@@ -54,7 +54,9 @@ const users: User[] = [];
 - [x] Done
 - [ ] Todo
 
-![[diagram.png|400]]
+![[diagram.svg|The conversion pipeline|240]]
+
+An inline icon ![](attachments/diagram.svg) without alt text.
 
 Footnote[^1].
 
