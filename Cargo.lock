@@ -86,7 +86,6 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
- "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
  "tree-sitter-cpp",
