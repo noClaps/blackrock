@@ -214,8 +214,7 @@ impl Renderer<'_> {
         for (index, event) in run.into_iter().enumerate() {
             let next_at_boundary = matches!(event, Event::SoftBreak | Event::HardBreak);
             match event {
-                Event::InlineMath(latex) => processed.push(self.math(&latex, MathDisplay::Inline)),
-                Event::DisplayMath(latex) => processed.push(self.math(&latex, MathDisplay::Block)),
+                Event::InlineMath(_) | Event::DisplayMath(_) => processed.push(self.math(event)),
                 Event::Text(text) => {
                     let mut marks = Vec::new();
                     while let Some(&(_, offset, open)) =
@@ -244,8 +243,8 @@ impl Renderer<'_> {
     ///
     /// The label holds the alt text and optionally a size, as in `alt|300` or `alt|300x200`. For
     /// wikilinks, the label can also be just a size. An image with alt text becomes a figure,
-    /// unless it is inside a link, with the label's markup as its caption and its plain text as
-    /// the alt text.
+    /// unless it is inside a link, with the label's markup (and rendered math) as its caption and
+    /// its plain text (with math as LaTeX) as the alt text.
     fn image<'a>(
         &mut self,
         link: &str,
@@ -287,7 +286,8 @@ impl Renderer<'_> {
             Event::InlineHtml(html.into())
         } else {
             let mut figcaption = String::new();
-            html::push_html(&mut figcaption, label.into_iter());
+            let label = label.into_iter().map(|event| self.math(event));
+            html::push_html(&mut figcaption, label);
             let figcaption = figcaption.trim();
             // A block-level event, which `hoist_figures` moves out of paragraphs.
             Event::Html(
@@ -297,8 +297,14 @@ impl Renderer<'_> {
         }
     }
 
-    /// Converts LaTeX to a MathML Core `<math>` element.
-    fn math<'a>(&mut self, latex: &str, display: MathDisplay) -> Event<'a> {
+    /// Converts a math event's LaTeX to a MathML Core `<math>` element. Other events are returned
+    /// unchanged.
+    fn math<'a>(&mut self, event: Event<'a>) -> Event<'a> {
+        let (latex, display) = match &event {
+            Event::InlineMath(latex) => (latex, MathDisplay::Inline),
+            Event::DisplayMath(latex) => (latex, MathDisplay::Block),
+            _ => return event,
+        };
         match self.math.convert_with_global_state(latex, display) {
             Ok(result) => Event::InlineHtml(result.mathml.into()),
             Err(err) => self.error(format!("cannot render math `{}`: {err}", latex.trim())),
@@ -353,7 +359,9 @@ fn plain_text(run: &[Event]) -> String {
     let mut text = String::new();
     for event in run {
         match event {
-            Event::Text(s) | Event::Code(s) | Event::InlineMath(s) => text.push_str(s),
+            Event::Text(s) | Event::Code(s) | Event::InlineMath(s) | Event::DisplayMath(s) => {
+                text.push_str(s);
+            }
             Event::SoftBreak | Event::HardBreak => text.push(' '),
             _ => {}
         }
@@ -558,8 +566,8 @@ fn strip_comments(markdown: &str) -> String {
 /// Takes an image's label (its alt text, or for a wikilink the part after `|`) from the end of
 /// the reversed `events`, up to and including the image's end.
 ///
-/// Only text, code, links, emphasis and line breaks are kept. Nested images are reduced to their
-/// labels.
+/// Only text, code, math, links, emphasis and line breaks are kept. Nested images are reduced to
+/// their labels.
 fn image_label<'a>(events: &mut Vec<Event<'a>>) -> Vec<Event<'a>> {
     let mut label = Vec::new();
     let mut depth = 0;
@@ -574,6 +582,8 @@ fn image_label<'a>(events: &mut Vec<Event<'a>>) -> Vec<Event<'a>> {
             )
             | Event::Text(_)
             | Event::Code(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
             | Event::SoftBreak
             | Event::HardBreak => label.push(event),
             _ => {}
@@ -980,6 +990,31 @@ mod tests {
                 "<img src=\"https://example.com/cat.png?a=1&amp;b=2\" alt=\"A cat\">",
                 "A cat"
             )
+        );
+    }
+
+    #[test]
+    fn math_in_captions() {
+        let html = render_in_vault("![Area $r^2$ and $$x<y$$|300](cat.png)").unwrap();
+        assert_eq!(
+            html,
+            format!(
+                "<figure>\n<img src=\"{CAT}\" alt=\"Area r^2 and x&lt;y\" width=\"300\">\n\
+                 <figcaption>Area <math><msup><mi>r</mi><mn>2</mn></msup></math> and \
+                 <math display=\"block\"><mi>x</mi><mo>&lt;</mo><mi>y</mi></math>\
+                 </figcaption>\n</figure>\n"
+            )
+        );
+        // Images in links aren't figures, but keep the math in their alt text.
+        assert_eq!(
+            render_in_vault("[![A $b$](cat.png)](u)").unwrap(),
+            format!("<p><a href=\"u\"><img src=\"{CAT}\" alt=\"A b\"></a></p>\n")
+        );
+        let errors = render_in_vault("![Bad $\\nope$](cat.png)").unwrap_err();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].starts_with("cannot render math `\\nope`"),
+            "{errors:?}"
         );
     }
 

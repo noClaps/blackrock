@@ -43,7 +43,9 @@ binaries need glibc, so they don't run on Alpine.
   `data:` URLs. Like Obsidian, they are looked up relative to the note, then the vault root, then
   anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian:
   `![[cat.png|300]]`, `![[cat.png|A cat|300x200]]`, `![A cat|300](cat.png)`
-- Images with alt text become `<figure>`s with the alt text as the `<figcaption>`
+- Images with alt text become `<figure>`s with the alt text as the `<figcaption>`. Links,
+  formatting and math are rendered in the caption; the `alt` attribute gets their plain text, with
+  math as LaTeX
 - Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (embeds of other files become links), callouts
   (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
