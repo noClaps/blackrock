@@ -20,20 +20,20 @@ This repository is an action that downloads a release binary for the runner (Lin
 x86-64 or ARM64) and adds it to the `PATH`. It works on GitHub Actions:
 
 ```yaml
-- uses: noClaps/blackrock@master
+- uses: noClaps/blackrock@v0.1.1
   with:
-    version: v0.1.0 # optional, defaults to the latest release
+    version: v0.1.1 # optional, defaults to the latest release
 - run: blackrock notes/note.md > note.html
 ```
 
 And on Forgejo Actions, using the full URL:
 
 ```yaml
-- uses: https://github.com/noClaps/blackrock@master
+- uses: https://github.com/noClaps/blackrock@v0.1.1
 ```
 
-The `version` input picks which release binary to install; `@master` only picks the version of
-the action itself. It needs `curl` or `wget`, which the usual runner images have. The Linux
+The `version` input picks which release binary to install; the tag after `@` only picks the
+version of the action itself. It needs `curl` or `wget`, which the usual runner images have. The Linux
 binaries need glibc, so they don't run on Alpine.
 
 ## Features
