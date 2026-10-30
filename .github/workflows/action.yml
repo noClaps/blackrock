@@ -19,7 +19,7 @@ jobs:
           version: ${{ matrix.version }}
       - run: blackrock --version
 
-  # Forgejo runners use this image by default.
+  # A Debian container, like the images Forgejo runners commonly use.
   container:
     runs-on: ubuntu-latest
     container: node:20-bookworm

@@ -33,7 +33,7 @@ And on Forgejo Actions, using the full URL:
 ```
 
 The `version` input picks which release binary to install; `@master` only picks the version of
-the action itself. It needs `curl` or `wget`, which the default images on both have. The Linux
+the action itself. It needs `curl` or `wget`, which the usual runner images have. The Linux
 binaries need glibc, so they don't run on Alpine.
 
 ## Features
