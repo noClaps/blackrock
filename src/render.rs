@@ -103,25 +103,25 @@ impl Renderer<'_> {
                     let label = image_label(&mut events);
                     match link_type {
                         // Other files, like notes, can't be embedded, so they become links.
-                        LinkType::WikiLink { .. } if !is_image(&dest_url) => out.extend([
-                            Event::Start(Tag::Link {
+                        LinkType::WikiLink { .. } if !is_image(&dest_url) => {
+                            out.push(Event::Start(Tag::Link {
                                 link_type,
                                 dest_url: wikilink_href(&dest_url).into(),
                                 title,
                                 id,
-                            }),
-                            Event::Text(label.into()),
-                            Event::End(TagEnd::Link),
-                        ]),
+                            }));
+                            out.extend(label);
+                            out.push(Event::End(TagEnd::Link));
+                        }
                         // The parser never puts wikilink images inside links.
                         LinkType::WikiLink { has_pothole } => {
-                            let label = if has_pothole { &label } else { "" };
+                            let label = if has_pothole { label } else { Vec::new() };
                             out.push(self.image(&dest_url, label, true, "", false));
                         }
                         _ => {
                             let link = percent_decode_str(&dest_url).decode_utf8_lossy();
                             let in_link = link_depth > 0;
-                            out.push(self.image(&link, &label, false, &title, in_link));
+                            out.push(self.image(&link, label, false, &title, in_link));
                         }
                     }
                 }
@@ -243,26 +243,29 @@ impl Renderer<'_> {
     /// Renders an image. Local images are embedded as `data:` URLs.
     ///
     /// The label holds the alt text and optionally a size, as in `alt|300` or `alt|300x200`. For
-    /// wikilinks, the label can also be just a size. An image with alt text becomes a figure with
-    /// the alt text as its caption, unless it is inside a link.
+    /// wikilinks, the label can also be just a size. An image with alt text becomes a figure,
+    /// unless it is inside a link, with the label's markup as its caption and its plain text as
+    /// the alt text.
     fn image<'a>(
         &mut self,
         link: &str,
-        label: &str,
+        mut label: Vec<Event>,
         is_wikilink: bool,
         title: &str,
         in_link: bool,
     ) -> Event<'a> {
-        let (alt, size) = if let Some((alt, Some(size))) = label
-            .rsplit_once('|')
-            .map(|(alt, size)| (alt, size_attrs(size)))
+        // The size follows the last `|`, which must be in the label's last text.
+        let whole_label_is_size = is_wikilink && label.len() == 1;
+        let mut size = String::new();
+        if let Some(Event::Text(last)) = label.last_mut()
+            && let Some((alt, attrs)) = (last.rsplit_once('|'))
+                .or(whole_label_is_size.then_some(("", last)))
+                .and_then(|(alt, size)| Some((alt.to_owned(), size_attrs(size)?)))
         {
-            (alt, size)
-        } else if let Some(size) = size_attrs(label).filter(|_| is_wikilink) {
-            ("", size)
-        } else {
-            (label, String::new())
-        };
+            size = attrs;
+            *last = alt.into();
+        }
+        let alt = plain_text(&label);
         let alt = alt.trim();
 
         let src = if is_remote(link) {
@@ -283,10 +286,13 @@ impl Renderer<'_> {
         if alt.is_empty() || in_link {
             Event::InlineHtml(html.into())
         } else {
+            let mut figcaption = String::new();
+            html::push_html(&mut figcaption, label.into_iter());
+            let figcaption = figcaption.trim();
             // A block-level event, which `hoist_figures` moves out of paragraphs.
-            let caption = text(alt);
             Event::Html(
-                format!("<figure>\n{html}\n<figcaption>{caption}</figcaption>\n</figure>\n").into(),
+                format!("<figure>\n{html}\n<figcaption>{figcaption}</figcaption>\n</figure>\n")
+                    .into(),
             )
         }
     }
@@ -551,15 +557,25 @@ fn strip_comments(markdown: &str) -> String {
 
 /// Takes an image's label (its alt text, or for a wikilink the part after `|`) from the end of
 /// the reversed `events`, up to and including the image's end.
-fn image_label(events: &mut Vec<Event>) -> String {
-    let mut label = String::new();
+///
+/// Only text, code, links, emphasis and line breaks are kept. Nested images are reduced to their
+/// labels.
+fn image_label<'a>(events: &mut Vec<Event<'a>>) -> Vec<Event<'a>> {
+    let mut label = Vec::new();
     let mut depth = 0;
     while let Some(event) = events.pop() {
         match event {
-            Event::Text(text) | Event::Code(text) => label.push_str(&text),
             Event::Start(Tag::Image { .. }) => depth += 1,
             Event::End(TagEnd::Image) if depth == 0 => break,
             Event::End(TagEnd::Image) => depth -= 1,
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. })
+            | Event::End(
+                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link,
+            )
+            | Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak => label.push(event),
             _ => {}
         }
     }
@@ -955,7 +971,7 @@ mod tests {
             html("![A *dog*](dog.svg \"Title\")"),
             figure(
                 &format!("<img src=\"{DOG}\" alt=\"A dog\" title=\"Title\">"),
-                "A dog"
+                "A <em>dog</em>"
             )
         );
         assert_eq!(
@@ -964,6 +980,38 @@ mod tests {
                 "<img src=\"https://example.com/cat.png?a=1&amp;b=2\" alt=\"A cat\">",
                 "A cat"
             )
+        );
+    }
+
+    #[test]
+    fn links_in_captions() {
+        let html = |md| render_in_vault(md).unwrap();
+        let figure = |alt: &str, size: &str, caption: &str| {
+            format!(
+                "<figure>\n<img src=\"{CAT}\" alt=\"{alt}\"{size}>\n\
+                 <figcaption>{caption}</figcaption>\n</figure>\n"
+            )
+        };
+        assert_eq!(
+            html("![A [cat](https://example.com/?a=1&b=2 \"Cat\") here|300](cat.png)"),
+            figure(
+                "A cat here",
+                " width=\"300\"",
+                "A <a href=\"https://example.com/?a=1&amp;b=2\" title=\"Cat\">cat</a> here"
+            )
+        );
+        assert_eq!(
+            html("![See [**`a<b`**](u)\nnow](cat.png)"),
+            figure(
+                "See a&lt;b now",
+                "",
+                "See <a href=\"u\"><strong><code>a&lt;b</code></strong></a>\nnow"
+            )
+        );
+        // A size can't contain markup.
+        assert_eq!(
+            html("![[cat.png|A *cat*|3**0**0]]"),
+            figure("A cat|300", "", "A <em>cat</em>|3<strong>0</strong>0")
         );
     }
 
