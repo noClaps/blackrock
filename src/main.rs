@@ -1,6 +1,5 @@
 mod frontmatter;
 mod highlight;
-mod math;
 mod render;
 mod vault;
 

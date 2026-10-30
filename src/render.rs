@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 
-use math_core::MathDisplay;
+use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
 use percent_encoding::percent_decode_str;
 use pulldown_cmark::{
     CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
@@ -13,7 +13,6 @@ use pulldown_cmark::{
 use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text};
 
 use crate::highlight;
-use crate::math::MathRenderer;
 use crate::vault::{self, Vault};
 
 fn options() -> Options {
@@ -32,8 +31,13 @@ fn options() -> Options {
 pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
     let markdown = strip_comments(markdown);
     let events: Vec<Event> = TextMergeStream::new(Parser::new_ext(&markdown, options())).collect();
+    let config = MathCoreConfig {
+        // Like MathJax in Obsidian, `\newcommand`s stay defined for the rest of the note.
+        global_group: true,
+        ..Default::default()
+    };
     let mut renderer = Renderer {
-        math: MathRenderer::new(),
+        math: LatexToMathML::new(config, Vec::new()).expect("no custom macros"),
         ids: HashMap::new(),
         vault,
         note_dir,
@@ -51,7 +55,7 @@ pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String,
 }
 
 struct Renderer<'v> {
-    math: MathRenderer,
+    math: LatexToMathML,
     /// How often each heading id has been used.
     ids: HashMap<String, usize>,
     vault: &'v Vault,
@@ -72,32 +76,24 @@ impl Renderer<'_> {
         // How many links we are in. Images in links can't be figures.
         let mut link_depth = 0;
 
-        while let Some(event) = events.pop() {
-            match event {
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    out.push(Event::Html(code_block(&kind, &mut events).into()));
-                }
+        while let Some(mut event) = events.pop() {
+            match &mut event {
                 Event::Start(Tag::Link {
                     link_type,
                     dest_url,
-                    title,
-                    id,
+                    ..
                 }) => {
                     link_depth += 1;
-                    let dest_url = match link_type {
-                        LinkType::WikiLink { .. } => wikilink_href(&dest_url).into(),
-                        _ => dest_url,
-                    };
-                    out.push(Event::Start(Tag::Link {
-                        link_type,
-                        dest_url,
-                        title,
-                        id,
-                    }));
+                    if let LinkType::WikiLink { .. } = link_type {
+                        *dest_url = wikilink_href(dest_url).into();
+                    }
                 }
-                Event::End(TagEnd::Link) => {
-                    link_depth -= 1;
-                    out.push(Event::End(TagEnd::Link));
+                Event::End(TagEnd::Link) => link_depth -= 1,
+                _ => {}
+            }
+            match event {
+                Event::Start(Tag::CodeBlock(kind)) => {
+                    out.push(Event::Html(code_block(&kind, &mut events).into()));
                 }
                 Event::Start(Tag::Image {
                     link_type,
@@ -189,9 +185,10 @@ impl Renderer<'_> {
             }
             Some(start @ Event::Start(Tag::Paragraph | Tag::Item)) => {
                 if let Some(block_id) = strip_block_id(&mut run) {
-                    let tag = match start {
-                        Event::Start(Tag::Paragraph) => "p",
-                        _ => "li",
+                    let tag = if *start == Event::Start(Tag::Paragraph) {
+                        "p"
+                    } else {
+                        "li"
                     };
                     *start = Event::Html(format!("<{tag} id=\"{}\">", attr(&block_id)).into());
                 }
@@ -285,10 +282,11 @@ impl Renderer<'_> {
         }
     }
 
+    /// Converts LaTeX to a MathML Core `<math>` element.
     fn math<'a>(&mut self, latex: &str, display: MathDisplay) -> Event<'a> {
-        match self.math.render(latex, display) {
-            Ok(mathml) => Event::InlineHtml(mathml.into()),
-            Err(err) => self.error(err),
+        match self.math.convert_with_global_state(latex, display) {
+            Ok(result) => Event::InlineHtml(result.mathml.into()),
+            Err(err) => self.error(format!("cannot render math `{}`: {err}", latex.trim())),
         }
     }
 
@@ -878,8 +876,10 @@ mod tests {
     #[test]
     fn renders_math() {
         assert_eq!(to_html("$x$\n"), "<p><math><mi>x</mi></math></p>\n");
+        // A `$$` block on its own isn't wrapped in a paragraph.
         let html = to_html("$$\nx\n$$\n");
-        assert!(html.contains("<math display=\"block\">"), "{html}");
+        assert!(html.starts_with("<math display=\"block\">"), "{html}");
+        assert!(html.ends_with("</math>\n"), "{html}");
     }
 
     #[test]
@@ -1023,6 +1023,12 @@ mod tests {
     }
 
     #[test]
+    fn math_macros_persist() {
+        let html = to_html("$\\newcommand{\\myreals}{\\mathbb{R}}$ $x \\in \\myreals$");
+        assert!(html.contains("ℝ"), "{html}");
+    }
+
+    #[test]
     fn math_errors_are_reported() {
         let errors = render_in_vault("$\\nope$ and $$\\alsonope$$ but $x$").unwrap_err();
         assert_eq!(errors.len(), 2, "{errors:?}");
@@ -1123,13 +1129,6 @@ mod tests {
             "<ul>\n<li id=\"^x\">item</li>\n<li>other</li>\n</ul>\n"
         );
         assert_eq!(to_html("2^10"), "<p>2^10</p>\n");
-    }
-
-    #[test]
-    fn display_math_paragraph_is_unwrapped() {
-        let html = to_html("$$\nx\n$$\n");
-        assert!(html.starts_with("<math display=\"block\">"), "{html}");
-        assert!(html.ends_with("</math>\n"), "{html}");
     }
 
     #[test]
