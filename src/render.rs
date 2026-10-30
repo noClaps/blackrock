@@ -29,7 +29,8 @@ fn options() -> Options {
 /// (relative to the vault root). Returns all errors if any image or math can't be rendered.
 pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
     let markdown = strip_comments(markdown);
-    let events: Vec<Event> = TextMergeStream::new(Parser::new_ext(&markdown, options())).collect();
+    let events = TextMergeStream::new(Parser::new_ext(&markdown, options())).collect();
+    let events = standalone_block_ids(events);
     let config = MathCoreConfig {
         // Like MathJax in Obsidian, `\newcommand`s stay defined for the rest of the note.
         global_group: true,
@@ -50,7 +51,7 @@ pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String,
     }
     let mut out = String::new();
     html::push_html(&mut out, events.into_iter());
-    Ok(out)
+    Ok(add_block_ids(&out))
 }
 
 struct Renderer<'v> {
@@ -388,13 +389,12 @@ fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
     let caret = trimmed.rfind('^')?;
     let id = &trimmed[caret + 1..];
     let before = &trimmed[..caret];
-    let valid_id = !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     // The id must be separated from the content before it, and there must be content.
     let separated = before.ends_with(char::is_whitespace)
         || (before.is_empty()
             && run.len() > 1
             && matches!(run[run.len() - 2], Event::SoftBreak | Event::HardBreak));
-    if !valid_id || !separated {
+    if !is_block_id(id) || !separated {
         return None;
     }
     let block_id = format!("^{id}");
@@ -408,6 +408,80 @@ fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
         run.push(Event::Text(kept.into()));
     }
     Some(block_id)
+}
+
+fn is_block_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Gives a block id on its own line, like `^id` after a table or a `$$…$$` block, to the block
+/// before it. `pulldown-cmark` can't add attributes to most elements, so this puts a marker before
+/// the block, which [`add_block_ids`] turns into an `id` on its opening tag.
+fn standalone_block_ids(mut events: Vec<Event>) -> Vec<Event> {
+    let mut out = Vec::new();
+    // Reversed so that we can pop events off the end and peek at the next ones.
+    events.reverse();
+    // The `out` index of each open element's start.
+    let mut starts = Vec::new();
+    // For each open element (and the document), the `out` index of its last child block's start.
+    let mut last_child = vec![None];
+    while let Some(event) = events.pop() {
+        let id = match (&event, events.last(), events.iter().rev().nth(1)) {
+            (
+                Event::Start(Tag::Paragraph),
+                Some(Event::Text(text)),
+                Some(Event::End(TagEnd::Paragraph)),
+            ) => text.trim().strip_prefix('^').filter(|id| is_block_id(id)),
+            _ => None,
+        };
+        if let (Some(id), Some(Some(start))) = (id, last_child.last()) {
+            // NUL never appears in the output otherwise, since the parser replaces it.
+            out.insert(*start, Event::Html(format!("\0^{id}\0\n").into()));
+            events.pop(); // Text
+            events.pop(); // End(Paragraph)
+            continue;
+        }
+        match event {
+            Event::Start(_) => {
+                starts.push(out.len());
+                last_child.push(None);
+            }
+            Event::End(_) => {
+                last_child.pop();
+                *last_child.last_mut().unwrap() = starts.pop();
+            }
+            _ => *last_child.last_mut().unwrap() = Some(out.len()),
+        }
+        out.push(event);
+    }
+    out
+}
+
+/// Replaces each marker left by [`standalone_block_ids`] with an `id` on the element after it,
+/// unless that element already has one.
+fn add_block_ids(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some((before, marked)) = rest.split_once('\0') {
+        let (id, after) = marked.split_once("\0\n").unwrap();
+        out.push_str(before);
+        rest = after;
+        let tag = &after[..after.find('>').unwrap_or(after.len())];
+        if let Some(name) = tag.strip_prefix('<')
+            && !tag.contains(" id=")
+        {
+            let name_end = 1 + name
+                .find(|c: char| !c.is_ascii_alphanumeric())
+                .unwrap_or(name.len());
+            out.push_str(&after[..name_end]);
+            out.push_str(" id=\"");
+            out.push_str(id);
+            out.push('"');
+            rest = &after[name_end..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Finds matching `==` pairs in a run, returning `(event index, byte offset, is opening)`.
@@ -1252,6 +1326,40 @@ mod tests {
         assert_eq!(to_html("2^10"), "<p>2^10</p>\n");
         assert_eq!(to_html("a ^x!"), "<p>a ^x!</p>\n");
         assert_eq!(to_html("^abc"), "<p>^abc</p>\n");
+    }
+
+    #[test]
+    fn standalone_block_ids_go_on_the_previous_block() {
+        assert_eq!(
+            to_html("$$\nx\n$$\n\n^math"),
+            "<math id=\"^math\" display=\"block\"><mi>x</mi></math>\n"
+        );
+        assert_eq!(
+            to_html("| a |\n|--:|\n| 1 |\n\n^t"),
+            "<table id=\"^t\"><thead><tr><th style=\"text-align: right\">a</th></tr></thead>\
+             <tbody>\n<tr><td style=\"text-align: right\">1</td></tr>\n</tbody></table>\n"
+        );
+        assert_eq!(
+            to_html("> [!tip]- Hi\n> body\n\n^c"),
+            "<details id=\"^c\" class=\"callout\" data-callout=\"tip\">\n\
+             <summary class=\"callout-title\">Hi</summary>\n\
+             <div class=\"callout-content\">\n<p>body</p>\n</div>\n</details>\n"
+        );
+        // Only the nearest block, inside the quote, gets the id.
+        assert_eq!(
+            to_html("> a\n>\n> - b\n>\n> ^l\n\n---\n\n^r"),
+            "<blockquote>\n<p>a</p>\n<ul id=\"^l\">\n<li>b</li>\n</ul>\n</blockquote>\n\
+             <hr id=\"^r\" />\n"
+        );
+        assert_eq!(
+            to_html("```\ncode\n```\n\n^c"),
+            "<pre id=\"^c\"><code>code\n</code></pre>\n"
+        );
+        // Elements that already have an id keep it.
+        assert_eq!(to_html("a ^first\n\n^second"), "<p id=\"^first\">a</p>\n");
+        assert_eq!(to_html("# A\n\n^b"), "<h1 id=\"a\">A</h1>\n");
+        // Without a block before it, it stays text.
+        assert_eq!(to_html("^a\n\n^b"), "<p id=\"^b\">^a</p>\n");
     }
 
     #[test]
