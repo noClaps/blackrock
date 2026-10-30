@@ -2,12 +2,15 @@ mod frontmatter;
 mod highlight;
 mod math;
 mod render;
+mod vault;
 
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
+
+use crate::vault::Vault;
 
 /// Convert an Obsidian-flavored markdown file into an HTML fragment.
 #[derive(Parser)]
@@ -25,32 +28,47 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("blackrock: {err}");
+        Err(errors) => {
+            for error in errors {
+                eprintln!("blackrock: {error}");
+            }
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let source = match &cli.input {
-        Some(path) if path.as_os_str() != "-" => std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?,
+fn run(cli: &Cli) -> Result<(), Vec<String>> {
+    let fail = |message: String| vec![message];
+    let cwd =
+        std::env::current_dir().map_err(|e| fail(format!("cannot get current directory: {e}")))?;
+    let vault = Vault::open(&cwd).map_err(fail)?;
+
+    let (source, note_dir) = match &cli.input {
+        Some(path) if path.as_os_str() != "-" => {
+            let source = std::fs::read_to_string(path)
+                .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
+            (source, path.parent().unwrap_or(Path::new("")))
+        }
         _ => {
-            let mut buf = String::new();
-            io::stdin().read_to_string(&mut buf)?;
-            buf
+            let mut source = String::new();
+            io::stdin()
+                .read_to_string(&mut source)
+                .map_err(|e| fail(format!("cannot read stdin: {e}")))?;
+            (source, Path::new(""))
         }
     };
 
     let (yaml, body) = frontmatter::split(&source);
-    let mut stdout = io::stdout().lock();
-    if cli.metadata {
-        let json = frontmatter::to_json(yaml).map_err(|e| format!("invalid frontmatter: {e}"))?;
-        serde_json::to_writer_pretty(&mut stdout, &json)?;
-        writeln!(stdout)?;
+    let output = if cli.metadata {
+        let json =
+            frontmatter::to_json(yaml).map_err(|e| fail(format!("invalid frontmatter: {e}")))?;
+        let mut json = serde_json::to_string_pretty(&json).expect("JSON values serialize");
+        json.push('\n');
+        json
     } else {
-        stdout.write_all(render::to_html(body).as_bytes())?;
-    }
-    Ok(())
+        render::to_html(body, &vault, note_dir)?
+    };
+    io::stdout()
+        .write_all(output.as_bytes())
+        .map_err(|e| fail(format!("cannot write output: {e}")))
 }

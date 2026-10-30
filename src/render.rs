@@ -3,8 +3,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 
 use math_core::MathDisplay;
+use percent_encoding::percent_decode_str;
 use pulldown_cmark::{
     CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
 };
@@ -12,6 +14,7 @@ use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text};
 
 use crate::highlight;
 use crate::math::MathRenderer;
+use crate::vault::{self, Vault};
 
 fn options() -> Options {
     Options::ENABLE_TABLES
@@ -23,27 +26,40 @@ fn options() -> Options {
 }
 
 /// Renders an Obsidian-flavored markdown body (without frontmatter) to an HTML fragment.
-pub fn to_html(markdown: &str) -> String {
+///
+/// Local images are looked up in `vault`, starting from the note's directory `note_dir`
+/// (relative to the vault root). Returns all errors if any image or math can't be rendered.
+pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
     let markdown = strip_comments(markdown);
     let events: Vec<Event> = TextMergeStream::new(Parser::new_ext(&markdown, options())).collect();
     let mut renderer = Renderer {
         math: MathRenderer::new(),
         ids: HashMap::new(),
+        vault,
+        note_dir,
+        errors: Vec::new(),
     };
     let events = renderer.blocks(events);
+    let events = hoist_figures(events);
     let events = renderer.inlines(events);
+    if !renderer.errors.is_empty() {
+        return Err(renderer.errors);
+    }
     let mut out = String::with_capacity(markdown.len() * 3 / 2);
     html::push_html(&mut out, events.into_iter());
-    out
+    Ok(out)
 }
 
-struct Renderer {
+struct Renderer<'v> {
     math: MathRenderer,
     /// How often each heading id has been used.
     ids: HashMap<String, usize>,
+    vault: &'v Vault,
+    note_dir: &'v Path,
+    errors: Vec<String>,
 }
 
-impl Renderer {
+impl Renderer<'_> {
     /// Rewrites code blocks, wikilinks, embeds and callouts.
     fn blocks<'a>(&mut self, mut events: Vec<Event<'a>>) -> Vec<Event<'a>> {
         let mut out = Vec::with_capacity(events.len());
@@ -53,6 +69,8 @@ impl Renderer {
         let mut quotes: Vec<Option<Callout>> = Vec::new();
         // The callout whose title we are currently in.
         let mut title: Option<Callout> = None;
+        // How many links we are in. Images in links can't be figures.
+        let mut link_depth = 0;
 
         while let Some(event) = events.pop() {
             match event {
@@ -72,31 +90,59 @@ impl Renderer {
                     out.push(Event::Html(code_block(lang, &code).into()));
                 }
                 Event::Start(Tag::Link {
-                    link_type: link_type @ LinkType::WikiLink { .. },
-                    dest_url,
-                    title,
-                    id,
-                }) => out.push(Event::Start(Tag::Link {
                     link_type,
-                    dest_url: wikilink_href(&dest_url).into(),
+                    dest_url,
                     title,
                     id,
-                })),
+                }) => {
+                    link_depth += 1;
+                    let dest_url = match link_type {
+                        LinkType::WikiLink { .. } => wikilink_href(&dest_url).into(),
+                        _ => dest_url,
+                    };
+                    out.push(Event::Start(Tag::Link {
+                        link_type,
+                        dest_url,
+                        title,
+                        id,
+                    }));
+                }
+                Event::End(TagEnd::Link) => {
+                    link_depth -= 1;
+                    out.push(Event::End(TagEnd::Link));
+                }
                 Event::Start(Tag::Image {
-                    link_type: LinkType::WikiLink { has_pothole },
+                    link_type,
                     dest_url,
+                    title,
                     ..
                 }) => {
                     let mut label = String::new();
+                    let mut depth = 0;
                     while let Some(event) = events.pop() {
                         match event {
                             Event::Text(text) | Event::Code(text) => label.push_str(&text),
-                            Event::End(TagEnd::Image) => break,
+                            Event::Start(Tag::Image { .. }) => depth += 1,
+                            Event::End(TagEnd::Image) if depth == 0 => break,
+                            Event::End(TagEnd::Image) => depth -= 1,
                             _ => {}
                         }
                     }
-                    let label = has_pothole.then_some(label.as_str());
-                    out.push(Event::InlineHtml(embed(&dest_url, label).into()));
+                    let image = match link_type {
+                        LinkType::WikiLink { has_pothole } => {
+                            let label = has_pothole.then_some(label.as_str());
+                            if is_image(&dest_url) {
+                                self.image(&dest_url, label, true, "", link_depth > 0)
+                            } else {
+                                Event::InlineHtml(media_embed(&dest_url, label).into())
+                            }
+                        }
+                        _ => {
+                            let link = percent_decode_str(&dest_url).decode_utf8_lossy();
+                            self.image(&link, Some(&label), false, &title, link_depth > 0)
+                        }
+                    };
+                    out.push(image);
                 }
                 Event::Start(Tag::BlockQuote(kind)) => {
                     let callout = match (events.last(), events.iter().rev().nth(1)) {
@@ -215,12 +261,14 @@ impl Renderer {
         for (index, event) in run.into_iter().enumerate() {
             let next_at_boundary = matches!(event, Event::SoftBreak | Event::HardBreak);
             match event {
-                Event::InlineMath(latex) => processed.push(Event::InlineHtml(
-                    self.math.render(&latex, MathDisplay::Inline).into(),
-                )),
-                Event::DisplayMath(latex) => processed.push(Event::InlineHtml(
-                    self.math.render(&latex, MathDisplay::Block).into(),
-                )),
+                Event::InlineMath(latex) => match self.math.render(&latex, MathDisplay::Inline) {
+                    Ok(mathml) => processed.push(Event::InlineHtml(mathml.into())),
+                    Err(err) => self.errors.push(err),
+                },
+                Event::DisplayMath(latex) => match self.math.render(&latex, MathDisplay::Block) {
+                    Ok(mathml) => processed.push(Event::InlineHtml(mathml.into())),
+                    Err(err) => self.errors.push(err),
+                },
                 Event::Text(text) => {
                     let mut marks = Vec::new();
                     while let Some(&(_, offset, open)) =
@@ -243,6 +291,71 @@ impl Renderer {
         }
         out.extend(processed);
         end
+    }
+
+    /// Renders an image. Local images are embedded as `data:` URLs.
+    ///
+    /// The label holds the alt text and optionally a size, as in `alt|300` or `alt|300x200`. For
+    /// wikilinks, the label can also be just a size. An image with alt text becomes a figure with
+    /// the alt text as its caption, unless it is inside a link.
+    fn image<'a>(
+        &mut self,
+        link: &str,
+        label: Option<&str>,
+        is_wikilink: bool,
+        title: &str,
+        in_link: bool,
+    ) -> Event<'a> {
+        let label = label.unwrap_or_default();
+        let (alt, size) = match label.rsplit_once('|') {
+            Some((alt, size)) if parse_size(size).is_some() => (alt, parse_size(size)),
+            _ if is_wikilink && parse_size(label).is_some() => ("", parse_size(label)),
+            _ => (label, None),
+        };
+        let alt = alt.trim();
+
+        let mut html = String::from("<img src=\"");
+        if is_remote(link) {
+            escape_href(&mut html, link).unwrap();
+        } else {
+            let data_url = match self.vault.resolve(link, self.note_dir) {
+                Some(path) => vault::image_data_url(&path),
+                None => Err(format!("image not found in vault: {link}")),
+            };
+            match data_url {
+                Ok(data_url) => html.push_str(&data_url),
+                Err(err) => {
+                    self.errors.push(err);
+                    return Event::InlineHtml("".into());
+                }
+            }
+        }
+        html.push_str("\" alt=\"");
+        escape_html(&mut html, alt).unwrap();
+        html.push('"');
+        if !title.is_empty() {
+            html.push_str(" title=\"");
+            escape_html(&mut html, title).unwrap();
+            html.push('"');
+        }
+        if let Some((width, height)) = size {
+            html.push_str(&format!(" width=\"{width}\""));
+            if let Some(height) = height {
+                html.push_str(&format!(" height=\"{height}\""));
+            }
+        }
+        html.push('>');
+
+        if alt.is_empty() || in_link {
+            return Event::InlineHtml(html.into());
+        }
+        let mut figure = String::from("<figure>\n");
+        figure.push_str(&html);
+        figure.push_str("\n<figcaption>");
+        escape_html_body_text(&mut figure, alt).unwrap();
+        figure.push_str("</figcaption>\n</figure>\n");
+        // A block-level event, which `hoist_figures` moves out of paragraphs.
+        Event::Html(figure.into())
     }
 
     /// Makes `id` unique within the document by appending a number if needed.
@@ -632,11 +745,75 @@ pub fn slugify(text: &str) -> String {
     }
 }
 
-/// Renders an Obsidian embed, `![[target]]` or `![[target|label]]`.
+/// Moves figures (the only block-level HTML inside paragraphs) out of their paragraphs, splitting
+/// the paragraph around them, since `<p>` can't contain `<figure>`.
+fn hoist_figures(events: Vec<Event>) -> Vec<Event> {
+    let mut out = Vec::with_capacity(events.len());
+    let mut in_paragraph = false;
+    for event in events {
+        match event {
+            Event::Start(Tag::Paragraph) => {
+                in_paragraph = true;
+                out.push(event);
+            }
+            Event::End(TagEnd::Paragraph) => {
+                in_paragraph = false;
+                close_paragraph(&mut out);
+            }
+            Event::Html(_) if in_paragraph => {
+                close_paragraph(&mut out);
+                out.push(event);
+                out.push(Event::Start(Tag::Paragraph));
+            }
+            // Don't start the rest of a split paragraph with a line break.
+            _ if is_blank(&event) && out.last() == Some(&Event::Start(Tag::Paragraph)) => {}
+            event => out.push(event),
+        }
+    }
+    out
+}
+
+/// Ends the paragraph at the end of `out`, removing it if it is empty.
+fn close_paragraph(out: &mut Vec<Event>) {
+    while out.last().is_some_and(is_blank) {
+        out.pop();
+    }
+    if out.last() == Some(&Event::Start(Tag::Paragraph)) {
+        out.pop();
+    } else {
+        out.push(Event::End(TagEnd::Paragraph));
+    }
+}
+
+fn is_blank(event: &Event) -> bool {
+    match event {
+        Event::SoftBreak | Event::HardBreak => true,
+        Event::Text(text) => text.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether a link points to another site rather than into the vault.
+fn is_remote(link: &str) -> bool {
+    link.starts_with("//")
+        || link.split_once(':').is_some_and(|(scheme, _)| {
+            scheme.len() > 1
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        })
+}
+
+fn is_image(target: &str) -> bool {
+    vault::image_mime_type(Path::new(target.split('#').next().unwrap_or_default())).is_some()
+}
+
+/// Renders an Obsidian embed of something other than an image, `![[target]]` or
+/// `![[target|label]]`.
 ///
-/// Images, audio, video and PDFs are embedded. Other files, like notes, can't be transcluded
-/// without the rest of the vault, so they become links.
-fn embed(target: &str, label: Option<&str>) -> String {
+/// Audio, video and PDFs are embedded. Other files, like notes, can't be transcluded, so they
+/// become links.
+fn media_embed(target: &str, label: Option<&str>) -> String {
     let path = target.split('#').next().unwrap_or_default().trim();
     let extension = path
         .rsplit_once('.')
@@ -645,28 +822,8 @@ fn embed(target: &str, label: Option<&str>) -> String {
     let mut html = String::new();
     let mut src = String::new();
     escape_href(&mut src, path).unwrap();
-    // `escape_href` doesn't escape `&` and `'`, which matter in attributes.
-    let src = src.replace('&', "&amp;").replace('\'', "&#39;");
 
     match extension.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "avif" | "ico" | "tif"
-        | "tiff" => {
-            html.push_str("<img src=\"");
-            html.push_str(&src);
-            html.push_str("\" alt=\"");
-            // The label is either a size like `300` or `300x200`, or alt text.
-            match label.and_then(parse_size) {
-                Some((width, height)) => {
-                    escape_html(&mut html, file_name(path)).unwrap();
-                    html.push_str(&format!("\" width=\"{width}"));
-                    if let Some(height) = height {
-                        html.push_str(&format!("\" height=\"{height}"));
-                    }
-                }
-                None => escape_html(&mut html, label.unwrap_or(file_name(path))).unwrap(),
-            }
-            html.push_str("\">");
-        }
         "mp3" | "wav" | "m4a" | "ogg" | "flac" | "3gp" | "oga" | "opus" => {
             html.push_str("<audio controls src=\"");
             html.push_str(&src);
@@ -685,10 +842,8 @@ fn embed(target: &str, label: Option<&str>) -> String {
             html.push_str("\"></iframe>");
         }
         _ => {
-            let mut href = String::new();
-            escape_href(&mut href, &wikilink_href(target)).unwrap();
             html.push_str("<a class=\"embed\" href=\"");
-            escape_html(&mut html, &href).unwrap();
+            escape_href(&mut html, &wikilink_href(target)).unwrap();
             html.push_str("\">");
             escape_html_body_text(&mut html, label.unwrap_or(target)).unwrap();
             html.push_str("</a>");
@@ -712,6 +867,13 @@ fn parse_size(label: &str) -> Option<(u32, Option<u32>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Renders markdown that doesn't reference any vault files.
+    fn to_html(markdown: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        super::to_html(markdown, &vault, Path::new("")).unwrap()
+    }
 
     #[test]
     fn highlights_code_blocks() {
@@ -759,19 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn embeds() {
-        assert_eq!(
-            to_html("![[cat.png]]"),
-            "<p><img src=\"cat.png\" alt=\"cat.png\"></p>\n"
-        );
-        assert_eq!(
-            to_html("![[a b.png|300x200]]"),
-            "<p><img src=\"a%20b.png\" alt=\"a b.png\" width=\"300\" height=\"200\"></p>\n"
-        );
-        assert_eq!(
-            to_html("![[cat.png|A cat]]"),
-            "<p><img src=\"cat.png\" alt=\"A cat\"></p>\n"
-        );
+    fn media_embeds() {
         assert_eq!(
             to_html("![[song.mp3]]"),
             "<p><audio controls src=\"song.mp3\"></audio></p>\n"
@@ -779,6 +929,132 @@ mod tests {
         assert_eq!(
             to_html("![[Other Note]]"),
             "<p><a class=\"embed\" href=\"Other%20Note\">Other Note</a></p>\n"
+        );
+        assert_eq!(
+            to_html("![[a&b.pdf]]"),
+            "<p><iframe src=\"a&amp;b.pdf\" title=\"a&amp;b.pdf\"></iframe></p>\n"
+        );
+    }
+
+    /// A vault with `img/cat.png` (containing `cat`) and `notes/dog.svg` (containing `dog`).
+    fn vault() -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".obsidian")).unwrap();
+        std::fs::create_dir_all(dir.path().join("img")).unwrap();
+        std::fs::create_dir_all(dir.path().join("notes")).unwrap();
+        std::fs::write(dir.path().join("img/cat.png"), "cat").unwrap();
+        std::fs::write(dir.path().join("notes/dog.svg"), "dog").unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
+        (dir, vault)
+    }
+
+    fn render_in_vault(markdown: &str) -> Result<String, Vec<String>> {
+        let (_dir, vault) = vault();
+        super::to_html(markdown, &vault, Path::new("notes"))
+    }
+
+    const CAT: &str = "data:image/png;base64,Y2F0";
+    const DOG: &str = "data:image/svg+xml;base64,ZG9n";
+
+    #[test]
+    fn images_without_alt_text() {
+        let html = |md| render_in_vault(md).unwrap();
+        assert_eq!(
+            html("![[cat.png]]"),
+            format!("<p><img src=\"{CAT}\" alt=\"\"></p>\n")
+        );
+        assert_eq!(
+            html("A ![[cat.png|300x200]] B"),
+            format!("<p>A <img src=\"{CAT}\" alt=\"\" width=\"300\" height=\"200\"> B</p>\n")
+        );
+        assert_eq!(
+            html("![](dog.svg)"),
+            format!("<p><img src=\"{DOG}\" alt=\"\"></p>\n")
+        );
+        assert_eq!(
+            html("![](../img/cat.png)"),
+            format!("<p><img src=\"{CAT}\" alt=\"\"></p>\n")
+        );
+    }
+
+    #[test]
+    fn images_with_alt_text_are_figures() {
+        let html = |md| render_in_vault(md).unwrap();
+        let figure = |img: &str, caption: &str| {
+            format!("<figure>\n{img}\n<figcaption>{caption}</figcaption>\n</figure>\n")
+        };
+        assert_eq!(
+            html("![[cat.png|A cat]]"),
+            figure(&format!("<img src=\"{CAT}\" alt=\"A cat\">"), "A cat")
+        );
+        assert_eq!(
+            html("![[cat.png|Tom & \"Jerry\"|300]]"),
+            figure(
+                &format!("<img src=\"{CAT}\" alt=\"Tom &amp; &quot;Jerry&quot;\" width=\"300\">"),
+                "Tom &amp; \"Jerry\""
+            )
+        );
+        assert_eq!(
+            html("![A *dog*](dog.svg \"Title\")"),
+            figure(
+                &format!("<img src=\"{DOG}\" alt=\"A dog\" title=\"Title\">"),
+                "A dog"
+            )
+        );
+        assert_eq!(
+            html("![A cat](https://example.com/cat.png?a=1&b=2)"),
+            figure(
+                "<img src=\"https://example.com/cat.png?a=1&amp;b=2\" alt=\"A cat\">",
+                "A cat"
+            )
+        );
+    }
+
+    #[test]
+    fn figures_split_paragraphs() {
+        let html = render_in_vault("Before\n![[cat.png|Cat]]\nafter *it*.").unwrap();
+        assert_eq!(
+            html,
+            format!(
+                "<p>Before</p>\n<figure>\n<img src=\"{CAT}\" alt=\"Cat\">\n\
+                 <figcaption>Cat</figcaption>\n</figure>\n<p>after <em>it</em>.</p>\n"
+            )
+        );
+    }
+
+    #[test]
+    fn images_in_links_are_not_figures() {
+        let html = render_in_vault("[![Cat](cat.png)](https://example.com)").unwrap();
+        assert_eq!(
+            html,
+            format!("<p><a href=\"https://example.com\"><img src=\"{CAT}\" alt=\"Cat\"></a></p>\n")
+        );
+    }
+
+    #[test]
+    fn missing_images_are_errors() {
+        let errors =
+            render_in_vault("![[missing.png]]\n\n![x](nope.jpg)\n\n![[cat.png]]").unwrap_err();
+        assert_eq!(
+            errors,
+            [
+                "image not found in vault: missing.png",
+                "image not found in vault: nope.jpg"
+            ]
+        );
+    }
+
+    #[test]
+    fn math_errors_are_reported() {
+        let errors = render_in_vault("$\\nope$ and $$\\alsonope$$ but $x$").unwrap_err();
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].starts_with("cannot render math `\\nope`"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].starts_with("cannot render math `\\alsonope`"),
+            "{errors:?}"
         );
     }
 
