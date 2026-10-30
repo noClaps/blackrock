@@ -10,7 +10,7 @@ use base64::engine::general_purpose::STANDARD;
 pub struct Vault {
     /// The canonicalized vault root.
     root: PathBuf,
-    /// All files in the vault, relative to the root, sorted. Collected on first use.
+    /// All files in the vault, sorted. Collected on first use.
     files: OnceCell<Vec<PathBuf>>,
 }
 
@@ -71,15 +71,18 @@ impl Vault {
 
         self.files()
             .iter()
-            .filter(|file| file.ends_with(relative))
+            .filter(|file| {
+                file.strip_prefix(&self.root)
+                    .is_ok_and(|f| f.ends_with(relative))
+            })
             .min_by_key(|file| file.components().count())
-            .map(|file| self.root.join(file))
+            .cloned()
     }
 
     fn files(&self) -> &[PathBuf] {
         self.files.get_or_init(|| {
             let mut files = Vec::new();
-            collect_files(&self.root, Path::new(""), &mut files);
+            collect_files(&self.root, &mut files);
             files.sort();
             files
         })
@@ -88,22 +91,20 @@ impl Vault {
 
 /// Recursively collects the files in `dir`, skipping hidden files and directories like
 /// `.obsidian`, `.git` and `.trash`.
-fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root.join(dir)) else {
+fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
+        if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        let path = dir.join(&name);
-        match entry.file_type() {
-            Ok(t) if t.is_dir() => collect_files(root, &path, files),
-            Ok(t) if t.is_file() => files.push(path),
-            // Follow symlinks to files, but not to directories, to avoid cycles.
-            Ok(t) if t.is_symlink() && root.join(&path).is_file() => files.push(path),
-            _ => {}
+        let path = entry.path();
+        // `is_file` follows symlinks, but symlinked directories aren't entered, to avoid cycles.
+        if path.is_file() {
+            files.push(path);
+        } else if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            collect_files(&path, files);
         }
     }
 }

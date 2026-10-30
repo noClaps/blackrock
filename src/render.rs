@@ -104,7 +104,8 @@ impl Renderer<'_> {
                     let image = if let LinkType::WikiLink { has_pothole } = link_type {
                         let label = has_pothole.then_some(label.as_str());
                         if is_image(&dest_url) {
-                            self.image(&dest_url, label, true, "", link_depth > 0)
+                            // The parser never puts wikilink images inside links.
+                            self.image(&dest_url, label, true, "", false)
                         } else {
                             Event::InlineHtml(media_embed(&dest_url, label).into())
                         }
@@ -418,28 +419,23 @@ fn find_highlights(run: &[Event]) -> Vec<(usize, usize, bool)> {
             let before = text[..at].chars().next_back();
             let after = text[at + 2..].chars().next();
             match open {
-                None => {
-                    let opens =
-                        before != Some('=') && after.is_none_or(|c| !c.is_whitespace() && c != '=');
-                    if opens {
-                        open = Some((index, at, depth));
-                        i = at + 2;
-                        continue;
-                    }
+                None if before != Some('=')
+                    && after.is_none_or(|c| !c.is_whitespace() && c != '=') =>
+                {
+                    open = Some((index, at, depth));
                 }
-                Some((open_index, open_offset, open_depth)) => {
-                    let closes = after != Some('=')
+                Some((open_index, open_offset, open_depth))
+                    if after != Some('=')
                         && open_depth == depth
-                        && before.is_none_or(|c| !c.is_whitespace() && c != '=');
-                    if closes {
-                        marks.push((open_index, open_offset, true));
-                        marks.push((index, at, false));
-                        open = None;
-                        i = at + 2;
-                        continue;
-                    }
+                        && before.is_none_or(|c| !c.is_whitespace() && c != '=') =>
+                {
+                    marks.push((open_index, open_offset, true));
+                    marks.push((index, at, false));
+                    open = None;
                 }
+                _ => {}
             }
+            // No mark can start at `at + 1`, since marks can't be next to another `=`.
             i = at + 1;
         }
     }
@@ -871,6 +867,9 @@ mod tests {
         assert!(html.ends_with("</math>\n"), "{html}");
         let html = to_html("$$a$$ $$b$$");
         assert!(html.starts_with("<math display=\"block\">"), "{html}");
+        // With other text, it stays in the paragraph.
+        let html = to_html("a $$x$$");
+        assert!(html.starts_with("<p>a <math display=\"block\">"), "{html}");
     }
 
     #[test]
@@ -890,10 +889,26 @@ mod tests {
     }
 
     #[test]
+    fn gfm_extensions() {
+        assert_eq!(
+            to_html("| a |\n| - |\n| b |\n\n~~s~~ x[^1]\n\n- [ ] t\n\n[^1]: n"),
+            "<table><thead><tr><th>a</th></tr></thead><tbody>\n<tr><td>b</td></tr>\n</tbody></table>\n\
+             <p><del>s</del> x<sup class=\"footnote-reference\"><a href=\"#1\">1</a></sup></p>\n\
+             <ul>\n<li><input disabled=\"\" type=\"checkbox\"/>\nt</li>\n</ul>\n\
+             <div class=\"footnote-definition\" id=\"1\"><sup class=\"footnote-definition-label\">1</sup>\n\
+             <p>n</p>\n</div>\n"
+        );
+    }
+
+    #[test]
     fn media_embeds() {
         assert_eq!(
             to_html("![[song.mp3]]"),
             "<p><audio controls src=\"song.mp3\"></audio></p>\n"
+        );
+        assert_eq!(
+            to_html("![[clip.mp4]]"),
+            "<p><video controls src=\"clip.mp4\"></video></p>\n"
         );
         assert_eq!(
             to_html("![[Other Note]]"),
@@ -1002,8 +1017,28 @@ mod tests {
 
     #[test]
     fn nested_images_use_the_inner_alt_text() {
-        let html = render_in_vault("![![inner](cat.png)](cat.png)").unwrap();
-        assert!(html.contains("<figcaption>inner</figcaption>"), "{html}");
+        assert_eq!(
+            render_in_vault("![![inner](cat.png)](cat.png)").unwrap(),
+            format!(
+                "<figure>\n<img src=\"{CAT}\" alt=\"inner\">\n\
+                 <figcaption>inner</figcaption>\n</figure>\n"
+            )
+        );
+    }
+
+    #[test]
+    fn images_after_links_are_figures() {
+        let html = render_in_vault("[a](b) ![Cat](cat.png)").unwrap();
+        assert!(
+            html.starts_with("<p><a href=\"b\">a</a></p>\n<figure>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn adjacent_figures_have_no_paragraph_between() {
+        let html = render_in_vault("![[cat.png|A]] ![[cat.png|B]]").unwrap();
+        assert!(html.contains("</figure>\n<figure>"), "{html}");
     }
 
     #[test]
@@ -1098,6 +1133,9 @@ mod tests {
             "<p><mark>a <strong>b</strong> c</mark></p>\n"
         );
         assert_eq!(to_html("x === y == z"), "<p>x === y == z</p>\n");
+        assert_eq!(to_html("a == b=="), "<p>a == b==</p>\n");
+        assert_eq!(to_html("==a =="), "<p>==a ==</p>\n");
+        assert_eq!(to_html("==a==b=="), "<p><mark>a</mark>b==</p>\n");
         // An unclosed mark inside emphasis doesn't stop later marks.
         assert_eq!(
             to_html("*==a* ==b=="),
@@ -1119,6 +1157,10 @@ mod tests {
         assert_eq!(
             to_html("[link #x](y)"),
             "<p><a href=\"y\">link #x</a></p>\n"
+        );
+        assert_eq!(
+            to_html("[a](b) #x"),
+            "<p><a href=\"b\">a</a> <a class=\"tag\" href=\"#x\">#x</a></p>\n"
         );
     }
 
@@ -1152,11 +1194,14 @@ mod tests {
             "<ul>\n<li id=\"^x\">item</li>\n<li>other</li>\n</ul>\n"
         );
         assert_eq!(to_html("2^10"), "<p>2^10</p>\n");
+        assert_eq!(to_html("a ^x!"), "<p>a ^x!</p>\n");
+        assert_eq!(to_html("^abc"), "<p>^abc</p>\n");
     }
 
     #[test]
     fn comments() {
         assert_eq!(to_html("a %%hidden%% b"), "<p>a  b</p>\n");
+        assert_eq!(to_html("%%x%% a"), "<p>a</p>\n");
         assert_eq!(
             to_html("a\n\n%%\nblock\n\n# x\n%%\n\nb"),
             "<p>a</p>\n<p>b</p>\n"
@@ -1173,5 +1218,7 @@ mod tests {
         assert_eq!(slugify("Hello, World!"), "hello-world");
         assert_eq!(slugify("  Ünïcode  — dash "), "ünïcode-dash");
         assert_eq!(slugify("!!!"), "section");
+        assert_eq!(slugify("a - b_c"), "a-b-c");
+        assert_eq!(slugify("a,b-c"), "ab-c");
     }
 }
