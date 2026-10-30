@@ -65,13 +65,13 @@ const CAPTURES: &[(&str, &str)] = &[
     ("variable.builtin", CONSTANT),
 ];
 
-/// All supported languages, keyed by their canonical name.
+/// All supported languages, keyed by their Shiki language id.
 static LANGUAGES: LazyLock<HashMap<&'static str, HighlightConfiguration>> = LazyLock::new(|| {
     // TypeScript's and C++'s queries extend JavaScript's and C's.
     let ts_highlights = [ts::HIGHLIGHTS_QUERY, js::HIGHLIGHT_QUERY].concat();
     let ts_locals = [ts::LOCALS_QUERY, js::LOCALS_QUERY].concat();
     let languages = [
-        ("bash", bash::LANGUAGE, bash::HIGHLIGHT_QUERY, "", ""),
+        ("shellscript", bash::LANGUAGE, bash::HIGHLIGHT_QUERY, "", ""),
         ("c", c::LANGUAGE, c::HIGHLIGHT_QUERY, "", ""),
         (
             "cpp",
@@ -144,24 +144,26 @@ static LANGUAGES: LazyLock<HashMap<&'static str, HighlightConfiguration>> = Lazy
         .collect()
 });
 
-/// Maps a code block's info string (or an injected language name) to a supported language.
-fn canonical_name(lang: &str) -> Option<&'static str> {
+/// Maps a code block's info string (or an injected language name) to a supported language's
+/// Shiki id, accepting the same ids and aliases as Shiki.
+fn shiki_id(lang: &str) -> Option<&'static str> {
     Some(match lang.to_ascii_lowercase().as_str() {
-        "bash" | "sh" | "shell" => "bash",
+        "shellscript" | "bash" | "sh" | "shell" | "zsh" => "shellscript",
         "c" => "c",
         "cpp" | "c++" => "cpp",
         "css" => "css",
         "go" => "go",
         "html" => "html",
         "java" => "java",
-        "javascript" | "js" | "jsx" => "javascript",
+        // The JavaScript queries include JSX, so Shiki's separate `jsx` language uses them too.
+        "javascript" | "js" | "cjs" | "mjs" | "jsx" => "javascript",
         "json" => "json",
         "python" | "py" => "python",
         "ruby" | "rb" => "ruby",
         "rust" | "rs" => "rust",
         "toml" => "toml",
         "tsx" => "tsx",
-        "typescript" | "ts" => "typescript",
+        "typescript" | "ts" | "cts" | "mts" => "typescript",
         "yaml" | "yml" => "yaml",
         _ => return None,
     })
@@ -171,11 +173,11 @@ fn canonical_name(lang: &str) -> Option<&'static str> {
 ///
 /// Returns `None` if the language is not supported or the code could not be highlighted.
 pub fn highlight(lang: &str, code: &str) -> Option<String> {
-    let config = LANGUAGES.get(canonical_name(lang)?)?;
+    let config = LANGUAGES.get(shiki_id(lang)?)?;
     let mut highlighter = Highlighter::new();
     let events = highlighter
         .highlight(config, code.as_bytes(), None, None, |injected| {
-            LANGUAGES.get(canonical_name(injected)?)
+            LANGUAGES.get(shiki_id(injected)?)
         })
         .ok()?;
 
@@ -203,6 +205,24 @@ mod tests {
     #[test]
     fn all_languages_load() {
         assert_eq!(LANGUAGES.len(), 16);
+    }
+
+    #[test]
+    fn uses_shiki_ids_and_aliases() {
+        for id in LANGUAGES.keys() {
+            assert_eq!(shiki_id(id), Some(*id));
+        }
+        for (alias, id) in [
+            ("bash", "shellscript"),
+            ("ZSH", "shellscript"),
+            ("c++", "cpp"),
+            ("mjs", "javascript"),
+            ("jsx", "javascript"),
+            ("mts", "typescript"),
+            ("yml", "yaml"),
+        ] {
+            assert_eq!(shiki_id(alias), Some(id), "{alias}");
+        }
     }
 
     #[test]

@@ -28,11 +28,14 @@ nothing is written to stdout, and the exit status is 1.
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]
 - Code blocks highlighted with Tree-sitter using GitHub's colors, as inline
   `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements get no styles.
-  Supported: Bash, C, C++, CSS, Go, HTML (with embedded JS/CSS), Java, JavaScript/JSX, JSON,
-  Python, Ruby, Rust, TOML, TypeScript/TSX and YAML
+  Languages use [Shiki]'s ids and aliases: `c`, `cpp` (`c++`), `css`, `go`, `html` (with embedded
+  JavaScript and CSS), `java`, `javascript` (`js`, `cjs`, `mjs`), `json`, `jsx`, `python` (`py`),
+  `ruby` (`rb`), `rust` (`rs`), `shellscript` (`bash`, `sh`, `shell`, `zsh`), `toml`, `tsx`,
+  `typescript` (`ts`, `cts`, `mts`) and `yaml` (`yml`)
 
 `light-dark()` picks a color based on the element's used color scheme, so the page needs to
 declare which schemes it supports, e.g. `:root { color-scheme: light dark; }`.
 
 [MathML Core]: https://www.w3.org/TR/mathml-core/
 [math-core]: https://github.com/tmke8/math-core
+[Shiki]: https://shiki.style/languages
