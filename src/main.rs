@@ -1,4 +1,5 @@
 mod frontmatter;
+mod highlight;
 mod render;
 
 use std::io::{self, Read, Write};

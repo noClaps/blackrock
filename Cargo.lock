@@ -74,6 +74,7 @@ dependencies = [
  "clap",
  "math-core",
  "pulldown-cmark",
+ "pulldown-cmark-escape",
  "serde_json",
  "serde_yaml_ng",
  "tree-sitter",

@@ -29,7 +29,8 @@ fn strip_fence_line<'a>(source: &'a str, fence: &str) -> Option<&'a str> {
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let rest = source.strip_prefix(fence)?;
     let rest = rest.trim_start_matches([' ', '\t']);
-    rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))
+    rest.strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
 }
 
 /// Parses YAML frontmatter into a JSON value. Empty frontmatter becomes an empty object.
