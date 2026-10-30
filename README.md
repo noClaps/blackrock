@@ -14,6 +14,28 @@ cat notes/note.md | blackrock           # read from stdin
 If anything can't be rendered (a missing image, invalid math), every error is printed to stderr,
 nothing is written to stdout, and the exit status is 1.
 
+## Installing in CI
+
+This repository is an action that downloads a release binary for the runner (Linux or macOS,
+x86-64 or ARM64) and adds it to the `PATH`. It works on GitHub Actions:
+
+```yaml
+- uses: noClaps/blackrock@master
+  with:
+    version: v0.1.0 # optional, defaults to the latest release
+- run: blackrock notes/note.md > note.html
+```
+
+And on Forgejo Actions, using the full URL:
+
+```yaml
+- uses: https://github.com/noClaps/blackrock@master
+```
+
+The `version` input picks which release binary to install; `@master` only picks the version of
+the action itself. It needs `curl` or `wget`, which the default images on both have. The Linux
+binaries need glibc, so they don't run on Alpine.
+
 ## Features
 
 - CommonMark plus tables, footnotes, strikethrough and task lists

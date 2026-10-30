@@ -1,0 +1,29 @@
+name: Test action
+
+on:
+  push:
+    paths: [action.yml, .github/workflows/action.yml]
+  workflow_dispatch:
+
+jobs:
+  install:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        version: [latest, v0.1.0]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          version: ${{ matrix.version }}
+      - run: blackrock --version
+
+  # Forgejo runners use this image by default.
+  container:
+    runs-on: ubuntu-latest
+    container: node:20-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+      - run: blackrock --version

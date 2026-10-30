@@ -1,0 +1,52 @@
+name: Set up blackrock
+description: Install the blackrock CLI and add it to the PATH.
+
+inputs:
+  version:
+    description: The release tag to install, like `v0.1.0`, or `latest`.
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    # Only POSIX `sh`, `uname`, `tar` and `curl` or `wget` are used, and the binary is added to the
+    # PATH through the `GITHUB_PATH` file, so this works on both GitHub and Forgejo Actions.
+    - shell: sh
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -eu
+        case "$(uname -s)" in
+          Linux) os=unknown-linux-gnu ;;
+          Darwin) os=apple-darwin ;;
+          *) echo "blackrock: unsupported OS $(uname -s)" >&2; exit 1 ;;
+        esac
+        case "$(uname -m)" in
+          x86_64 | amd64) arch=x86_64 ;;
+          aarch64 | arm64) arch=aarch64 ;;
+          *) echo "blackrock: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+        esac
+        file="blackrock-$arch-$os.tar.gz"
+        if [ "$VERSION" = latest ]; then
+          url="https://github.com/noClaps/blackrock/releases/latest/download/$file"
+        else
+          url="https://github.com/noClaps/blackrock/releases/download/$VERSION/$file"
+        fi
+
+        dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/blackrock"
+        mkdir -p "$dir"
+        if command -v curl >/dev/null; then
+          download="curl -fsSL -o"
+        elif command -v wget >/dev/null; then
+          download="wget -q -O"
+        else
+          echo "blackrock: curl or wget is needed to download $url" >&2; exit 1
+        fi
+        $download "$dir/$file" "$url" || {
+          echo "blackrock: cannot download $url; is $VERSION a release tag?" >&2; exit 1
+        }
+        tar -xzf "$dir/$file" -C "$dir"
+        rm "$dir/$file"
+
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/blackrock" --version
