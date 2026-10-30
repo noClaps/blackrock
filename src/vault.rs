@@ -2,8 +2,7 @@
 
 use std::cell::OnceCell;
 use std::fs;
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -25,15 +24,24 @@ impl Vault {
                 root.display()
             ));
         }
-        Self::new(root).map_err(|e| format!("cannot open vault {}: {e}", root.display()))
-    }
-
-    /// Opens a vault at `root` without checking that it is one.
-    pub fn new(root: &Path) -> io::Result<Self> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| format!("cannot open vault {}: {e}", root.display()))?;
         Ok(Self {
-            root: root.canonicalize()?,
+            root,
             files: OnceCell::new(),
         })
+    }
+
+    /// Finds an image linked from a note in `note_dir` and reads it into a `data:` URL.
+    pub fn image_data_url(&self, link: &str, note_dir: &Path) -> Result<String, String> {
+        let path = self
+            .resolve(link, note_dir)
+            .ok_or_else(|| format!("image not found in vault: {link}"))?;
+        let mime = image_mime_type(&path)
+            .ok_or_else(|| format!("{} is not a supported image type", path.display()))?;
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
     }
 
     /// Finds the file a link in a note in `note_dir` points to, the way Obsidian does: relative
@@ -41,22 +49,18 @@ impl Vault {
     /// ends with the link (preferring the shortest such path).
     ///
     /// Files outside the vault are never returned.
-    pub fn resolve(&self, link: &str, note_dir: &Path) -> Option<PathBuf> {
-        let link = Path::new(link.trim());
-        let relative: PathBuf = link
-            .components()
-            .filter(|c| !matches!(c, Component::RootDir | Component::Prefix(_)))
-            .collect();
+    fn resolve(&self, link: &str, note_dir: &Path) -> Option<PathBuf> {
+        // A leading `/` makes a link relative to the vault root only.
+        let (relative, from_root) = match link.trim().strip_prefix('/') {
+            Some(relative) => (Path::new(relative), true),
+            None => (Path::new(link.trim()), false),
+        };
         if relative.as_os_str().is_empty() {
             return None;
         }
 
-        let note_dir = self.root.join(note_dir);
-        let candidates = [
-            (!link.has_root()).then(|| note_dir.join(&relative)),
-            Some(self.root.join(&relative)),
-        ];
-        for candidate in candidates.into_iter().flatten() {
+        let from_note = (!from_root).then(|| self.root.join(note_dir).join(relative));
+        for candidate in from_note.into_iter().chain([self.root.join(relative)]) {
             if let Ok(path) = candidate.canonicalize()
                 && path.is_file()
                 && path.starts_with(&self.root)
@@ -65,16 +69,9 @@ impl Vault {
             }
         }
 
-        // Only plain names like `folder/image.png` can match by suffix.
-        if !relative
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-        {
-            return None;
-        }
         self.files()
             .iter()
-            .filter(|file| file.ends_with(&relative))
+            .filter(|file| file.ends_with(relative))
             .min_by_key(|file| file.components().count())
             .map(|file| self.root.join(file))
     }
@@ -126,14 +123,6 @@ pub fn image_mime_type(path: &Path) -> Option<&'static str> {
         "tif" | "tiff" => "image/tiff",
         _ => return None,
     })
-}
-
-/// Reads an image into a `data:` URL.
-pub fn image_data_url(path: &Path) -> Result<String, String> {
-    let mime = image_mime_type(path)
-        .ok_or_else(|| format!("{} is not a supported image type", path.display()))?;
-    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
 }
 
 #[cfg(test)]
@@ -190,12 +179,15 @@ mod tests {
 
     #[test]
     fn data_urls() {
-        let (dir, _vault) = vault();
+        let (dir, vault) = vault();
+        let data_url = |link| vault.image_data_url(link, Path::new(""));
+        assert_eq!(data_url("a.png").unwrap(), "data:image/png;base64,YS5wbmc=");
         assert_eq!(
-            image_data_url(&dir.path().join("a.png")).unwrap(),
-            "data:image/png;base64,YS5wbmc="
+            data_url("nope.png").unwrap_err(),
+            "image not found in vault: nope.png"
         );
-        let err = image_data_url(Path::new("x.txt")).unwrap_err();
+        std::fs::write(dir.path().join("x.txt"), "").unwrap();
+        let err = data_url("x.txt").unwrap_err();
         assert!(err.ends_with("is not a supported image type"), "{err}");
     }
 }

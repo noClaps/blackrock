@@ -2,7 +2,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::ops::Range;
 use std::path::Path;
 
@@ -46,7 +45,7 @@ pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String,
     if !renderer.errors.is_empty() {
         return Err(renderer.errors);
     }
-    let mut out = String::with_capacity(markdown.len() * 3 / 2);
+    let mut out = String::new();
     html::push_html(&mut out, events.into_iter());
     Ok(out)
 }
@@ -162,10 +161,7 @@ impl Renderer<'_> {
                 out.push(end);
             }
         }
-        if !run.is_empty() {
-            let end = self.run(&mut out, run, Event::Html("".into()));
-            out.push(end);
-        }
+        // Inline content is always inside a block, so `run` is empty here.
         out
     }
 
@@ -197,10 +193,7 @@ impl Renderer<'_> {
                         Event::Start(Tag::Paragraph) => "p",
                         _ => "li",
                     };
-                    let mut html = format!("<{tag} id=\"");
-                    escape_html(&mut html, &block_id).unwrap();
-                    html.push_str("\">");
-                    *start = Event::Html(html.into());
+                    *start = Event::Html(format!("<{tag} id=\"{}\">", attr(&block_id)).into());
                 }
             }
             _ => {}
@@ -214,14 +207,8 @@ impl Renderer<'_> {
         for (index, event) in run.into_iter().enumerate() {
             let next_at_boundary = matches!(event, Event::SoftBreak | Event::HardBreak);
             match event {
-                Event::InlineMath(latex) => match self.math.render(&latex, MathDisplay::Inline) {
-                    Ok(mathml) => processed.push(Event::InlineHtml(mathml.into())),
-                    Err(err) => self.errors.push(err),
-                },
-                Event::DisplayMath(latex) => match self.math.render(&latex, MathDisplay::Block) {
-                    Ok(mathml) => processed.push(Event::InlineHtml(mathml.into())),
-                    Err(err) => self.errors.push(err),
-                },
+                Event::InlineMath(latex) => processed.push(self.math(&latex, MathDisplay::Inline)),
+                Event::DisplayMath(latex) => processed.push(self.math(&latex, MathDisplay::Block)),
                 Event::Text(text) => {
                     let mut marks = Vec::new();
                     while let Some(&(_, offset, open)) =
@@ -260,55 +247,55 @@ impl Renderer<'_> {
         in_link: bool,
     ) -> Event<'a> {
         let label = label.unwrap_or_default();
-        let (alt, size) = match label.rsplit_once('|') {
-            Some((alt, size)) if parse_size(size).is_some() => (alt, parse_size(size)),
-            _ if is_wikilink && parse_size(label).is_some() => ("", parse_size(label)),
-            _ => (label, None),
+        let (alt, size) = if let Some((alt, Some(size))) = label
+            .rsplit_once('|')
+            .map(|(alt, size)| (alt, size_attrs(size)))
+        {
+            (alt, size)
+        } else if let Some(size) = size_attrs(label).filter(|_| is_wikilink) {
+            ("", size)
+        } else {
+            (label, String::new())
         };
         let alt = alt.trim();
 
-        let mut html = String::from("<img src=\"");
-        if is_remote(link) {
-            escape_href(&mut html, link).unwrap();
+        let src = if is_remote(link) {
+            href(link)
         } else {
-            let data_url = match self.vault.resolve(link, self.note_dir) {
-                Some(path) => vault::image_data_url(&path),
-                None => Err(format!("image not found in vault: {link}")),
-            };
-            match data_url {
-                Ok(data_url) => html.push_str(&data_url),
-                Err(err) => {
-                    self.errors.push(err);
-                    return Event::InlineHtml("".into());
-                }
+            match self.vault.image_data_url(link, self.note_dir) {
+                Ok(data_url) => data_url,
+                Err(err) => return self.error(err),
             }
-        }
-        html.push_str("\" alt=\"");
-        escape_html(&mut html, alt).unwrap();
-        html.push('"');
-        if !title.is_empty() {
-            html.push_str(" title=\"");
-            escape_html(&mut html, title).unwrap();
-            html.push('"');
-        }
-        if let Some((width, height)) = size {
-            write!(html, " width=\"{width}\"").unwrap();
-            if let Some(height) = height {
-                write!(html, " height=\"{height}\"").unwrap();
-            }
-        }
-        html.push('>');
+        };
+        let title = if title.is_empty() {
+            String::new()
+        } else {
+            format!(" title=\"{}\"", attr(title))
+        };
+        let html = format!("<img src=\"{src}\" alt=\"{}\"{title}{size}>", attr(alt));
 
         if alt.is_empty() || in_link {
-            return Event::InlineHtml(html.into());
+            Event::InlineHtml(html.into())
+        } else {
+            // A block-level event, which `hoist_figures` moves out of paragraphs.
+            let caption = text(alt);
+            Event::Html(
+                format!("<figure>\n{html}\n<figcaption>{caption}</figcaption>\n</figure>\n").into(),
+            )
         }
-        let mut figure = String::from("<figure>\n");
-        figure.push_str(&html);
-        figure.push_str("\n<figcaption>");
-        escape_html_body_text(&mut figure, alt).unwrap();
-        figure.push_str("</figcaption>\n</figure>\n");
-        // A block-level event, which `hoist_figures` moves out of paragraphs.
-        Event::Html(figure.into())
+    }
+
+    fn math<'a>(&mut self, latex: &str, display: MathDisplay) -> Event<'a> {
+        match self.math.render(latex, display) {
+            Ok(mathml) => Event::InlineHtml(mathml.into()),
+            Err(err) => self.error(err),
+        }
+    }
+
+    /// Records an error, returning an empty event to use in place of what couldn't be rendered.
+    fn error<'a>(&mut self, err: String) -> Event<'a> {
+        self.errors.push(err);
+        Event::InlineHtml("".into())
     }
 
     /// Makes `id` unique within the document by appending a number if needed.
@@ -335,21 +322,13 @@ fn is_inline(event: &Event) -> bool {
         | Event::TaskListMarker(_) => true,
         Event::Start(tag) => matches!(
             tag,
-            Tag::Emphasis
-                | Tag::Strong
-                | Tag::Strikethrough
-                | Tag::Superscript
-                | Tag::Subscript
-                | Tag::Link { .. }
-                | Tag::Image { .. }
+            Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. }
         ),
         Event::End(tag) => matches!(
             tag,
             TagEnd::Emphasis
                 | TagEnd::Strong
                 | TagEnd::Strikethrough
-                | TagEnd::Superscript
-                | TagEnd::Subscript
                 | TagEnd::Link
                 | TagEnd::Image
         ),
@@ -484,7 +463,7 @@ fn split_text<'a>(
     let mut marks = marks.iter().peekable();
     let mut plain_start = 0;
     let mut i = 0;
-    let flush = |out: &mut Vec<Event<'a>>, range: std::ops::Range<usize>| {
+    let flush = |out: &mut Vec<Event<'a>>, range: Range<usize>| {
         if !range.is_empty() {
             out.push(Event::Text(text[range].to_owned().into()));
         }
@@ -534,14 +513,11 @@ fn tag_at(text: &str) -> &str {
 }
 
 fn tag_html(tag: &str) -> String {
-    let mut href = String::from("#");
-    escape_href(&mut href, tag).unwrap();
-    let mut html = String::from("<a class=\"tag\" href=\"");
-    escape_html(&mut html, &href).unwrap();
-    html.push_str("\">#");
-    escape_html_body_text(&mut html, tag).unwrap();
-    html.push_str("</a>");
-    html
+    format!(
+        "<a class=\"tag\" href=\"{}\">#{}</a>",
+        href(&format!("#{tag}")),
+        text(tag)
+    )
 }
 
 /// Removes Obsidian comments (`%%…%%`), except in code and math. An unclosed comment extends to
@@ -656,33 +632,32 @@ impl Callout {
             .unwrap_or_default()
     }
 
+    /// The element for the callout and its title: `<details>` and `<summary>` if it's foldable.
+    fn elements(&self) -> (&'static str, &'static str) {
+        match self.fold {
+            Some(_) => ("details", "summary"),
+            None => ("div", "div"),
+        }
+    }
+
     fn open(&self) -> String {
-        let mut html = String::from(match self.fold {
-            Some(_) => "<details class=\"callout\" data-callout=\"",
-            None => "<div class=\"callout\" data-callout=\"",
-        });
-        escape_html(&mut html, &self.kind).unwrap();
-        html.push('"');
-        match self.fold {
-            Some(true) => html.push_str(" open>\n<summary class=\"callout-title\">"),
-            Some(false) => html.push_str(">\n<summary class=\"callout-title\">"),
-            None => html.push_str(">\n<div class=\"callout-title\">"),
-        }
-        html
+        let (outer, title) = self.elements();
+        let open = if self.fold == Some(true) { " open" } else { "" };
+        let kind = attr(&self.kind);
+        format!(
+            "<{outer} class=\"callout\" data-callout=\"{kind}\"{open}>\n<{title} class=\"callout-title\">"
+        )
     }
 
-    fn end_title(&self) -> &'static str {
-        match self.fold {
-            Some(_) => "</summary>\n<div class=\"callout-content\">\n",
-            None => "</div>\n<div class=\"callout-content\">\n",
-        }
+    fn end_title(&self) -> String {
+        format!(
+            "</{}>\n<div class=\"callout-content\">\n",
+            self.elements().1
+        )
     }
 
-    fn close(&self) -> &'static str {
-        match self.fold {
-            Some(_) => "</div>\n</details>\n",
-            None => "</div>\n</div>\n",
-        }
+    fn close(&self) -> String {
+        format!("</div>\n</{}>\n", self.elements().0)
     }
 }
 
@@ -700,43 +675,31 @@ fn code_block(kind: &CodeBlockKind, events: &mut Vec<Event>) -> String {
         CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
         CodeBlockKind::Indented => "",
     };
-    let mut html = String::from("<pre><code");
-    if !lang.is_empty() {
-        html.push_str(" class=\"language-");
-        escape_html(&mut html, lang).unwrap();
-        html.push('"');
-    }
-    html.push('>');
-    match highlight::highlight(lang, &code) {
-        Some(highlighted) => html.push_str(&highlighted),
-        None => escape_html_body_text(&mut html, &code).unwrap(),
-    }
-    html.push_str("</code></pre>\n");
-    html
+    let class = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{}\"", attr(lang))
+    };
+    let code = highlight::highlight(lang, &code).unwrap_or_else(|| text(&code));
+    format!("<pre><code{class}>{code}</code></pre>\n")
 }
 
 /// Turns a wikilink target like `Note#Heading` or `#^block` into a URL.
 fn wikilink_href(target: &str) -> String {
-    let (page, fragment) = match target.split_once('#') {
-        Some((page, fragment)) => (page, Some(fragment)),
-        None => (target, None),
+    let Some((page, fragment)) = target.split_once('#') else {
+        return target.trim().to_owned();
     };
-    let mut href = page.trim().to_owned();
-    if let Some(fragment) = fragment {
-        href.push('#');
-        // `Note#Heading#Subheading` links to the subheading.
-        let fragment = fragment.rsplit('#').next().unwrap_or_default().trim();
-        if fragment.starts_with('^') {
-            href.push_str(fragment);
-        } else {
-            href.push_str(&slugify(fragment));
-        }
+    // `Note#Heading#Subheading` links to the subheading.
+    let fragment = fragment.rsplit('#').next().unwrap().trim();
+    if fragment.starts_with('^') {
+        format!("{}#{fragment}", page.trim())
+    } else {
+        format!("{}#{}", page.trim(), slugify(fragment))
     }
-    href
 }
 
 /// Turns heading text into an `id`, e.g. `Hello, World!` into `hello-world`.
-pub fn slugify(text: &str) -> String {
+fn slugify(text: &str) -> String {
     let mut slug = String::with_capacity(text.len());
     for c in text.chars() {
         if c.is_alphanumeric() {
@@ -813,7 +776,7 @@ fn is_remote(link: &str) -> bool {
 }
 
 fn is_image(target: &str) -> bool {
-    vault::image_mime_type(Path::new(target.split('#').next().unwrap_or_default())).is_some()
+    vault::image_mime_type(Path::new(target.split('#').next().unwrap())).is_some()
 }
 
 /// Renders an Obsidian embed of something other than an image, `![[target]]` or
@@ -822,54 +785,60 @@ fn is_image(target: &str) -> bool {
 /// Audio, video and PDFs are embedded. Other files, like notes, can't be transcluded, so they
 /// become links.
 fn media_embed(target: &str, label: Option<&str>) -> String {
-    let path = target.split('#').next().unwrap_or_default().trim();
+    let path = target.split('#').next().unwrap().trim();
     let extension = path
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    let mut html = String::new();
-    let mut src = String::new();
-    escape_href(&mut src, path).unwrap();
-
+    let src = href(path);
     match extension.as_str() {
         "mp3" | "wav" | "m4a" | "ogg" | "flac" | "3gp" | "oga" | "opus" => {
-            html.push_str("<audio controls src=\"");
-            html.push_str(&src);
-            html.push_str("\"></audio>");
+            format!("<audio controls src=\"{src}\"></audio>")
         }
-        "mp4" | "webm" | "ogv" | "mov" | "mkv" => {
-            html.push_str("<video controls src=\"");
-            html.push_str(&src);
-            html.push_str("\"></video>");
-        }
+        "mp4" | "webm" | "ogv" | "mov" | "mkv" => format!("<video controls src=\"{src}\"></video>"),
         "pdf" => {
-            html.push_str("<iframe src=\"");
-            html.push_str(&src);
-            html.push_str("\" title=\"");
-            escape_html(&mut html, label.unwrap_or(file_name(path))).unwrap();
-            html.push_str("\"></iframe>");
+            let title = attr(label.unwrap_or(path.rsplit('/').next().unwrap()));
+            format!("<iframe src=\"{src}\" title=\"{title}\"></iframe>")
         }
-        _ => {
-            html.push_str("<a class=\"embed\" href=\"");
-            escape_href(&mut html, &wikilink_href(target)).unwrap();
-            html.push_str("\">");
-            escape_html_body_text(&mut html, label.unwrap_or(target)).unwrap();
-            html.push_str("</a>");
-        }
+        _ => format!(
+            "<a class=\"embed\" href=\"{}\">{}</a>",
+            href(&wikilink_href(target)),
+            text(label.unwrap_or(target))
+        ),
     }
-    html
 }
 
-fn file_name(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
+/// Escapes text for an HTML attribute value.
+fn attr(s: &str) -> String {
+    let mut out = String::new();
+    escape_html(&mut out, s).unwrap();
+    out
 }
 
-/// Parses an embed size like `300` or `300x200`.
-fn parse_size(label: &str) -> Option<(u32, Option<u32>)> {
-    match label.trim().split_once('x') {
-        Some((width, height)) => Some((width.parse().ok()?, Some(height.parse().ok()?))),
-        None => Some((label.trim().parse().ok()?, None)),
-    }
+/// Escapes text for HTML element content.
+fn text(s: &str) -> String {
+    let mut out = String::new();
+    escape_html_body_text(&mut out, s).unwrap();
+    out
+}
+
+/// Escapes a URL for an `href` or `src` attribute value.
+fn href(s: &str) -> String {
+    let mut out = String::new();
+    escape_href(&mut out, s).unwrap();
+    out
+}
+
+/// Parses an embed size like `300` or `300x200` into `width` and `height` attributes.
+fn size_attrs(size: &str) -> Option<String> {
+    let size = size.trim();
+    Some(match size.split_once('x') {
+        Some((width, height)) => {
+            let (width, height): (u32, u32) = (width.parse().ok()?, height.parse().ok()?);
+            format!(" width=\"{width}\" height=\"{height}\"")
+        }
+        None => format!(" width=\"{}\"", size.parse::<u32>().ok()?),
+    })
 }
 
 #[cfg(test)]
@@ -879,7 +848,8 @@ mod tests {
     /// Renders markdown that doesn't reference any vault files.
     fn to_html(markdown: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Vault::new(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join(".obsidian")).unwrap();
+        let vault = Vault::open(dir.path()).unwrap();
         super::to_html(markdown, &vault, Path::new("")).unwrap()
     }
 
