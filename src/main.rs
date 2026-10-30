@@ -16,7 +16,7 @@ use crate::vault::Vault;
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// The markdown file to read. Reads from stdin if omitted or `-`.
+    /// The markdown file to read. Reads from stdin if omitted.
     input: Option<PathBuf>,
 
     /// Output the YAML frontmatter as JSON instead of rendering HTML.
@@ -43,7 +43,7 @@ fn run(cli: &Cli) -> Result<String, Vec<String>> {
         std::env::current_dir().map_err(|e| vec![format!("cannot get current directory: {e}")])?;
     let vault = Vault::open(&cwd).map_err(|e| vec![e])?;
 
-    let path = cli.input.as_deref().filter(|path| *path != Path::new("-"));
+    let path = cli.input.as_deref();
     let source = match path {
         Some(path) => fs::read_to_string(path),
         None => io::read_to_string(io::stdin()),

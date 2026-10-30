@@ -5,7 +5,7 @@ use serde_json::{Map, Value as Json};
 /// Splits a document into its raw YAML frontmatter (if any) and the remaining markdown body.
 ///
 /// Frontmatter must start on the very first line with `---` and end with a line containing only
-/// `---` (or `...`).
+/// `---`.
 pub fn split(source: &str) -> (Option<&str>, &str) {
     let text = source.strip_prefix('\u{feff}').unwrap_or(source);
     let Some((first, rest)) = text.split_once('\n') else {
@@ -16,7 +16,7 @@ pub fn split(source: &str) -> (Option<&str>, &str) {
     }
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
-        if matches!(line.trim_end(), "---" | "...") {
+        if line.trim_end() == "---" {
             return (Some(&rest[..offset]), &rest[offset + line.len()..]);
         }
         offset += line.len();

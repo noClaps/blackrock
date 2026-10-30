@@ -1,6 +1,5 @@
 //! Markdown to HTML rendering, with Obsidian's extensions to markdown.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
@@ -66,7 +65,7 @@ struct Renderer<'v> {
 impl Renderer<'_> {
     /// Rewrites code blocks, wikilinks, embeds and callouts.
     fn blocks<'a>(&mut self, mut events: Vec<Event<'a>>) -> Vec<Event<'a>> {
-        let mut out = Vec::with_capacity(events.len());
+        let mut out = Vec::new();
         // Reversed so that we can pop events off the end and push back the ones we only peeked.
         events.reverse();
         // For each open blockquote, whether it is a callout and if so, whether it is foldable.
@@ -145,7 +144,7 @@ impl Renderer<'_> {
 
     /// Processes each run of inline content, see [`Self::run`].
     fn inlines<'a>(&mut self, events: Vec<Event<'a>>) -> Vec<Event<'a>> {
-        let mut out = Vec::with_capacity(events.len());
+        let mut out = Vec::new();
         let mut run = Vec::new();
         for event in events {
             if is_inline(&event) {
@@ -198,7 +197,7 @@ impl Renderer<'_> {
 
         let highlights = find_highlights(&run);
         let mut highlights = highlights.iter().peekable();
-        let mut processed = Vec::with_capacity(run.len());
+        let mut processed = Vec::new();
         let mut link_depth = 0;
         let mut at_boundary = true;
         for (index, event) in run.into_iter().enumerate() {
@@ -420,11 +419,8 @@ fn find_highlights(run: &[Event]) -> Vec<(usize, usize, bool)> {
             let after = text[at + 2..].chars().next();
             match open {
                 None => {
-                    let opens = before != Some('=')
-                        && match after {
-                            Some(c) => !c.is_whitespace() && c != '=',
-                            None => index + 1 < run.len(),
-                        };
+                    let opens =
+                        before != Some('=') && after.is_none_or(|c| !c.is_whitespace() && c != '=');
                     if opens {
                         open = Some((index, at, depth));
                         i = at + 2;
@@ -520,10 +516,7 @@ fn tag_html(tag: &str) -> String {
 
 /// Removes Obsidian comments (`%%…%%`), except in code and math. An unclosed comment extends to
 /// the end of the document.
-fn strip_comments(markdown: &str) -> Cow<'_, str> {
-    if !markdown.contains("%%") {
-        return Cow::Borrowed(markdown);
-    }
+fn strip_comments(markdown: &str) -> String {
     let protected: Vec<Range<usize>> = Parser::new_ext(markdown, options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
@@ -541,14 +534,14 @@ fn strip_comments(markdown: &str) -> Cow<'_, str> {
             .find(|i| !protected.iter().any(|range| range.contains(i)))
     };
 
-    let mut out = String::with_capacity(markdown.len());
+    let mut out = String::new();
     let mut copied = 0;
     while let Some(open) = find_delimiter(copied) {
         out.push_str(&markdown[copied..open]);
         copied = find_delimiter(open + 2).map_or(markdown.len(), |close| close + 2);
     }
     out.push_str(&markdown[copied..]);
-    Cow::Owned(out)
+    out
 }
 
 /// Takes an image's label (its alt text, or for a wikilink the part after `|`) from the end of
@@ -698,7 +691,7 @@ fn wikilink_href(target: &str) -> String {
 
 /// Turns heading text into an `id`, e.g. `Hello, World!` into `hello-world`.
 fn slugify(text: &str) -> String {
-    let mut slug = String::with_capacity(text.len());
+    let mut slug = String::new();
     for c in text.chars() {
         if c.is_alphanumeric() {
             slug.extend(c.to_lowercase());
@@ -717,7 +710,7 @@ fn slugify(text: &str) -> String {
 /// Moves figures (the only block-level HTML inside paragraphs) out of their paragraphs, splitting
 /// the paragraph around them, since `<p>` can't contain `<figure>`.
 fn hoist_figures(events: Vec<Event>) -> Vec<Event> {
-    let mut out = Vec::with_capacity(events.len());
+    let mut out = Vec::new();
     let mut in_paragraph = false;
     for event in events {
         match event {
@@ -766,10 +759,9 @@ fn is_blank(event: &Event) -> bool {
 fn is_remote(link: &str) -> bool {
     link.starts_with("//")
         || link.split_once(':').is_some_and(|(scheme, _)| {
-            scheme.len() > 1
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+            scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
         })
 }
 
