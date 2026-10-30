@@ -136,12 +136,18 @@ mod tests {
             "notes/b.png",
             "notes/deep/b.png",
             "assets/deep/c.png",
+            "links/placeholder.png",
             ".obsidian/hidden.png",
         ] {
             let path = dir.path().join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, file).unwrap();
         }
+        std::os::unix::fs::symlink(
+            dir.path().join("a.png"),
+            dir.path().join("links/linked.png"),
+        )
+        .unwrap();
         let vault = Vault::open(dir.path()).unwrap();
         (dir, vault)
     }
@@ -171,6 +177,8 @@ mod tests {
         assert_eq!(resolve("b.png", ""), Some("notes/b.png".into()));
         assert_eq!(resolve("deep/b.png", ""), Some("notes/deep/b.png".into()));
         assert_eq!(resolve("c.png", ""), Some("assets/deep/c.png".into()));
+        // Symlinked files found by searching the vault.
+        assert_eq!(resolve("linked.png", ""), Some("links/linked.png".into()));
         // Hidden directories, missing files and files outside the vault.
         assert_eq!(resolve("hidden.png", ""), None);
         assert_eq!(resolve("missing.png", ""), None);

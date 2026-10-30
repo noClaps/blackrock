@@ -655,12 +655,9 @@ impl Callout {
 /// Renders a code block, taking its contents from the end of the reversed `events`.
 fn code_block(kind: &CodeBlockKind, events: &mut Vec<Event>) -> String {
     let mut code = String::new();
-    while let Some(event) = events.pop() {
-        match event {
-            Event::Text(text) => code.push_str(&text),
-            Event::End(TagEnd::CodeBlock) => break,
-            _ => {}
-        }
+    // Code blocks only contain text, so this stops after popping the block's end.
+    while let Some(Event::Text(text)) = events.pop() {
+        code.push_str(&text);
     }
     let lang = match kind {
         CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
@@ -872,6 +869,8 @@ mod tests {
         let html = to_html("$$\nx\n$$\n");
         assert!(html.starts_with("<math display=\"block\">"), "{html}");
         assert!(html.ends_with("</math>\n"), "{html}");
+        let html = to_html("$$a$$ $$b$$");
+        assert!(html.starts_with("<math display=\"block\">"), "{html}");
     }
 
     #[test]
@@ -1002,14 +1001,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_images_use_the_inner_alt_text() {
+        let html = render_in_vault("![![inner](cat.png)](cat.png)").unwrap();
+        assert!(html.contains("<figcaption>inner</figcaption>"), "{html}");
+    }
+
+    #[test]
     fn missing_images_are_errors() {
-        let errors =
-            render_in_vault("![[missing.png]]\n\n![x](nope.jpg)\n\n![[cat.png]]").unwrap_err();
+        let errors = render_in_vault("![[missing.png]]\n\n![x](nope.jpg)\n\n![[cat.png]]\n\n![]()")
+            .unwrap_err();
         assert_eq!(
             errors,
             [
                 "image not found in vault: missing.png",
-                "image not found in vault: nope.jpg"
+                "image not found in vault: nope.jpg",
+                "image not found in vault: ",
             ]
         );
     }
@@ -1057,6 +1063,18 @@ mod tests {
     }
 
     #[test]
+    fn quotes_that_are_not_callouts() {
+        assert_eq!(
+            to_html("> **bold**"),
+            "<blockquote>\n<p><strong>bold</strong></p>\n</blockquote>\n"
+        );
+        assert_eq!(
+            to_html("> [!] x"),
+            "<blockquote>\n<p>[!] x</p>\n</blockquote>\n"
+        );
+    }
+
+    #[test]
     fn nested_callouts_and_plain_quotes() {
         let html = to_html("> [!note]\n> > [!warning] Inner\n> > Text\n\n> plain");
         assert_eq!(
@@ -1080,6 +1098,11 @@ mod tests {
             "<p><mark>a <strong>b</strong> c</mark></p>\n"
         );
         assert_eq!(to_html("x === y == z"), "<p>x === y == z</p>\n");
+        // An unclosed mark inside emphasis doesn't stop later marks.
+        assert_eq!(
+            to_html("*==a* ==b=="),
+            "<p><em>==a</em> <mark>b</mark></p>\n"
+        );
         assert_eq!(to_html("==unclosed"), "<p>==unclosed</p>\n");
         // Marks crossing other inline elements would produce invalid HTML.
         assert_eq!(to_html("==a *b== c*"), "<p>==a <em>b== c</em></p>\n");
@@ -1096,6 +1119,14 @@ mod tests {
         assert_eq!(
             to_html("[link #x](y)"),
             "<p><a href=\"y\">link #x</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn multiline_heading_ids() {
+        assert_eq!(
+            to_html("Two\nlines\n==="),
+            "<h1 id=\"two-lines\">Two\nlines</h1>\n"
         );
     }
 

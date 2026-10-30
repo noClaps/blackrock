@@ -51,6 +51,11 @@ mod tests {
     }
 
     #[test]
+    fn single_line_without_newline() {
+        assert_eq!(split("---"), (None, "---"));
+    }
+
+    #[test]
     fn unterminated_frontmatter_is_body() {
         let (yaml, body) = split("---\ntitle: Hi\n");
         assert_eq!(yaml, None);
