@@ -52,3 +52,36 @@ fn reports_missing_files() {
         "{stderr}"
     );
 }
+
+#[test]
+fn prints_help_and_version() {
+    let help = blackrock(".", &["--help"]);
+    assert!(help.status.success());
+    assert!(
+        help.stdout
+            .starts_with(b"Convert an Obsidian-flavored markdown file")
+    );
+    let version = blackrock(".", &["-V"]);
+    assert_eq!(
+        version.stdout,
+        format!("blackrock {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+    );
+}
+
+#[test]
+fn rejects_bad_arguments() {
+    for (args, error) in [
+        (
+            &["--nope"][..],
+            "blackrock: unknown option --nope; see --help\n",
+        ),
+        (
+            &["a.md", "b.md"],
+            "blackrock: too many arguments; see --help\n",
+        ),
+    ] {
+        let output = blackrock("examples", args);
+        assert!(!output.status.success());
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), error);
+    }
+}

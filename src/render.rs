@@ -807,10 +807,11 @@ fn size_attrs(size: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::tests::TempDir;
 
     /// Renders markdown that doesn't reference any vault files.
     fn to_html(markdown: &str) -> String {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new();
         std::fs::create_dir(dir.path().join(".obsidian")).unwrap();
         let vault = Vault::open(dir.path()).unwrap();
         super::to_html(markdown, &vault, Path::new("")).unwrap()
@@ -893,8 +894,8 @@ mod tests {
     }
 
     /// A vault with `img/cat.png` (containing `cat`) and `notes/dog.svg` (containing `dog`).
-    fn vault() -> (tempfile::TempDir, Vault) {
-        let dir = tempfile::tempdir().unwrap();
+    fn vault() -> (TempDir, Vault) {
+        let dir = TempDir::new();
         std::fs::create_dir_all(dir.path().join(".obsidian")).unwrap();
         std::fs::create_dir_all(dir.path().join("img")).unwrap();
         std::fs::create_dir_all(dir.path().join("notes")).unwrap();

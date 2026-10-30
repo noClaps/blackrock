@@ -4,9 +4,6 @@ use std::cell::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-
 pub struct Vault {
     /// The canonicalized vault root.
     root: PathBuf,
@@ -41,7 +38,7 @@ impl Vault {
         let mime = image_mime_type(&path)
             .ok_or_else(|| format!("{} is not a supported image type", path.display()))?;
         let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        Ok(format!("data:{mime};base64,{}", STANDARD.encode(bytes)))
+        Ok(format!("data:{mime};base64,{}", base64(&bytes)))
     }
 
     /// Finds the file a link in a note in `note_dir` points to, the way Obsidian does: relative
@@ -109,6 +106,23 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// Encodes bytes as standard, padded base64.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = (chunk.iter().enumerate()).fold(0, |n, (i, &b)| n | usize::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                char::from(ALPHABET[(n >> (18 - 6 * i)) & 63])
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
 /// The MIME type of an image file, based on its extension.
 pub fn image_mime_type(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -124,11 +138,34 @@ pub fn image_mime_type(path: &Path) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
-    fn vault() -> (tempfile::TempDir, Vault) {
-        let dir = tempfile::tempdir().unwrap();
+    /// A temporary directory, removed when dropped.
+    pub struct TempDir(PathBuf);
+
+    impl TempDir {
+        pub fn new() -> Self {
+            static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("blackrock-{}-{n}", std::process::id()));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn vault() -> (TempDir, Vault) {
+        let dir = TempDir::new();
         for file in [
             "a.png",
             "notes/b.png",
@@ -152,7 +189,7 @@ mod tests {
 
     #[test]
     fn requires_obsidian_directory() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = TempDir::new();
         let err = Vault::open(dir.path()).err().unwrap();
         assert!(err.contains("not the root of an Obsidian vault"), "{err}");
     }
@@ -181,6 +218,19 @@ mod tests {
         assert_eq!(resolve("hidden.png", ""), None);
         assert_eq!(resolve("missing.png", ""), None);
         assert_eq!(resolve("../../../../etc/hosts", "notes"), None);
+    }
+
+    #[test]
+    fn encodes_base64() {
+        let encoded =
+            ["", "f", "fo", "foo", "foob", "fooba", "foobar"].map(|s| base64(s.as_bytes()));
+        assert_eq!(
+            encoded,
+            [
+                "", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"
+            ]
+        );
+        assert_eq!(base64(&[0xfb, 0xff]), "+/8=");
     }
 
     #[test]
