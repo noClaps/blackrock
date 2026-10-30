@@ -4,7 +4,8 @@ mod math;
 mod render;
 mod vault;
 
-use std::io::{self, Read, Write};
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,50 +26,41 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(errors) => {
-            for error in errors {
-                eprintln!("blackrock: {error}");
-            }
-            ExitCode::FAILURE
-        }
+    let errors = match run(&Cli::parse()) {
+        Ok(output) => match io::stdout().write_all(output.as_bytes()) {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(e) => vec![format!("cannot write output: {e}")],
+        },
+        Err(errors) => errors,
+    };
+    for error in errors {
+        eprintln!("blackrock: {error}");
     }
+    ExitCode::FAILURE
 }
 
-fn run(cli: &Cli) -> Result<(), Vec<String>> {
-    let fail = |message: String| vec![message];
+fn run(cli: &Cli) -> Result<String, Vec<String>> {
     let cwd =
-        std::env::current_dir().map_err(|e| fail(format!("cannot get current directory: {e}")))?;
-    let vault = Vault::open(&cwd).map_err(fail)?;
+        std::env::current_dir().map_err(|e| vec![format!("cannot get current directory: {e}")])?;
+    let vault = Vault::open(&cwd).map_err(|e| vec![e])?;
 
-    let (source, note_dir) = match &cli.input {
-        Some(path) if path.as_os_str() != "-" => {
-            let source = std::fs::read_to_string(path)
-                .map_err(|e| fail(format!("cannot read {}: {e}", path.display())))?;
-            (source, path.parent().unwrap_or(Path::new("")))
-        }
-        _ => {
-            let mut source = String::new();
-            io::stdin()
-                .read_to_string(&mut source)
-                .map_err(|e| fail(format!("cannot read stdin: {e}")))?;
-            (source, Path::new(""))
-        }
+    let path = cli.input.as_deref().filter(|path| *path != Path::new("-"));
+    let source = match path {
+        Some(path) => fs::read_to_string(path),
+        None => io::read_to_string(io::stdin()),
     };
+    let source = source.map_err(|e| {
+        let name = path.map_or("stdin".into(), |path| path.display().to_string());
+        vec![format!("cannot read {name}: {e}")]
+    })?;
 
     let (yaml, body) = frontmatter::split(&source);
-    let output = if cli.metadata {
+    if cli.metadata {
         let json =
-            frontmatter::to_json(yaml).map_err(|e| fail(format!("invalid frontmatter: {e}")))?;
-        let mut json = serde_json::to_string_pretty(&json).expect("JSON values serialize");
-        json.push('\n');
-        json
+            frontmatter::to_json(yaml).map_err(|e| vec![format!("invalid frontmatter: {e}")])?;
+        Ok(format!("{json:#}\n"))
     } else {
-        render::to_html(body, &vault, note_dir)?
-    };
-    io::stdout()
-        .write_all(output.as_bytes())
-        .map_err(|e| fail(format!("cannot write output: {e}")))
+        let note_dir = path.and_then(Path::parent).unwrap_or(Path::new(""));
+        render::to_html(body, &vault, note_dir)
+    }
 }
