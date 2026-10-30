@@ -86,6 +86,11 @@ impl Renderer<'_> {
                     link_depth += 1;
                     if let LinkType::WikiLink { .. } = link_type {
                         *dest_url = wikilink_href(dest_url).into();
+                    } else if let Some((page, id)) = dest_url.split_once("#^")
+                        && is_block_id(id)
+                    {
+                        // Block ids are rendered without their `^`.
+                        *dest_url = format!("{page}#{id}").into();
                     }
                 }
                 Event::End(TagEnd::Link) => link_depth -= 1,
@@ -380,7 +385,7 @@ fn is_display_math_only(run: &[Event]) -> bool {
         })
 }
 
-/// Removes a trailing ` ^block-id` from a paragraph or list item, returning `^block-id`.
+/// Removes a trailing ` ^block-id` from a paragraph or list item, returning `block-id`.
 fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
     let Some(Event::Text(text)) = run.last() else {
         return None;
@@ -397,7 +402,7 @@ fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
     if !is_block_id(id) || !separated {
         return None;
     }
-    let block_id = format!("^{id}");
+    let block_id = id.to_owned();
     let kept = before.trim_end().to_owned();
     run.pop();
     if kept.is_empty() {
@@ -436,7 +441,7 @@ fn standalone_block_ids(mut events: Vec<Event>) -> Vec<Event> {
         };
         if let (Some(id), Some(Some(start))) = (id, last_child.last()) {
             // NUL never appears in the output otherwise, since the parser replaces it.
-            out.insert(*start, Event::Html(format!("\0^{id}\0\n").into()));
+            out.insert(*start, Event::Html(format!("\0{id}\0\n").into()));
             events.pop(); // Text
             events.pop(); // End(Paragraph)
             continue;
@@ -777,15 +782,16 @@ fn code_block(kind: &CodeBlockKind, events: &mut Vec<Event>) -> String {
     format!("<pre><code{class}>{code}</code></pre>\n")
 }
 
-/// Turns a wikilink target like `Note#Heading` or `#^block` into a URL.
+/// Turns a wikilink target like `Note#Heading` or `#^block` into a URL, like `Note#heading` or
+/// `#block`.
 fn wikilink_href(target: &str) -> String {
     let Some((page, fragment)) = target.split_once('#') else {
         return target.trim().to_owned();
     };
     // `Note#Heading#Subheading` links to the subheading.
     let fragment = fragment.rsplit('#').next().unwrap().trim();
-    if fragment.starts_with('^') {
-        format!("{}#{fragment}", page.trim())
+    if let Some(block_id) = fragment.strip_prefix('^') {
+        format!("{}#{block_id}", page.trim())
     } else {
         format!("{}#{}", page.trim(), slugify(fragment))
     }
@@ -965,7 +971,7 @@ mod tests {
         );
         assert_eq!(
             to_html("[[#^abc|block]]"),
-            "<p><a href=\"#^abc\">block</a></p>\n"
+            "<p><a href=\"#abc\">block</a></p>\n"
         );
     }
 
@@ -1316,50 +1322,56 @@ mod tests {
     fn block_ids() {
         assert_eq!(
             to_html("Some text ^abc-1"),
-            "<p id=\"^abc-1\">Some text</p>\n"
+            "<p id=\"abc-1\">Some text</p>\n"
         );
-        assert_eq!(to_html("Some text\n^abc"), "<p id=\"^abc\">Some text</p>\n");
+        assert_eq!(to_html("Some text\n^abc"), "<p id=\"abc\">Some text</p>\n");
         assert_eq!(
             to_html("- item ^x\n- other"),
-            "<ul>\n<li id=\"^x\">item</li>\n<li>other</li>\n</ul>\n"
+            "<ul>\n<li id=\"x\">item</li>\n<li>other</li>\n</ul>\n"
         );
         assert_eq!(to_html("2^10"), "<p>2^10</p>\n");
         assert_eq!(to_html("a ^x!"), "<p>a ^x!</p>\n");
         assert_eq!(to_html("^abc"), "<p>^abc</p>\n");
+        // Links to block ids drop the `^` too.
+        assert_eq!(
+            to_html("[a](#^abc) [b](Note#^x-1) [c](#^no!) [d](^e)"),
+            "<p><a href=\"#abc\">a</a> <a href=\"Note#x-1\">b</a> \
+             <a href=\"#^no!\">c</a> <a href=\"^e\">d</a></p>\n"
+        );
     }
 
     #[test]
     fn standalone_block_ids_go_on_the_previous_block() {
         assert_eq!(
             to_html("$$\nx\n$$\n\n^math"),
-            "<math id=\"^math\" display=\"block\"><mi>x</mi></math>\n"
+            "<math id=\"math\" display=\"block\"><mi>x</mi></math>\n"
         );
         assert_eq!(
             to_html("| a |\n|--:|\n| 1 |\n\n^t"),
-            "<table id=\"^t\"><thead><tr><th style=\"text-align: right\">a</th></tr></thead>\
+            "<table id=\"t\"><thead><tr><th style=\"text-align: right\">a</th></tr></thead>\
              <tbody>\n<tr><td style=\"text-align: right\">1</td></tr>\n</tbody></table>\n"
         );
         assert_eq!(
             to_html("> [!tip]- Hi\n> body\n\n^c"),
-            "<details id=\"^c\" class=\"callout\" data-callout=\"tip\">\n\
+            "<details id=\"c\" class=\"callout\" data-callout=\"tip\">\n\
              <summary class=\"callout-title\">Hi</summary>\n\
              <div class=\"callout-content\">\n<p>body</p>\n</div>\n</details>\n"
         );
         // Only the nearest block, inside the quote, gets the id.
         assert_eq!(
             to_html("> a\n>\n> - b\n>\n> ^l\n\n---\n\n^r"),
-            "<blockquote>\n<p>a</p>\n<ul id=\"^l\">\n<li>b</li>\n</ul>\n</blockquote>\n\
-             <hr id=\"^r\" />\n"
+            "<blockquote>\n<p>a</p>\n<ul id=\"l\">\n<li>b</li>\n</ul>\n</blockquote>\n\
+             <hr id=\"r\" />\n"
         );
         assert_eq!(
             to_html("```\ncode\n```\n\n^c"),
-            "<pre id=\"^c\"><code>code\n</code></pre>\n"
+            "<pre id=\"c\"><code>code\n</code></pre>\n"
         );
         // Elements that already have an id keep it.
-        assert_eq!(to_html("a ^first\n\n^second"), "<p id=\"^first\">a</p>\n");
+        assert_eq!(to_html("a ^first\n\n^second"), "<p id=\"first\">a</p>\n");
         assert_eq!(to_html("# A\n\n^b"), "<h1 id=\"a\">A</h1>\n");
         // Without a block before it, it stays text.
-        assert_eq!(to_html("^a\n\n^b"), "<p id=\"^b\">^a</p>\n");
+        assert_eq!(to_html("^a\n\n^b"), "<p id=\"b\">^a</p>\n");
     }
 
     #[test]
