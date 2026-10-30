@@ -115,13 +115,13 @@ impl Renderer<'_> {
                         ]),
                         // The parser never puts wikilink images inside links.
                         LinkType::WikiLink { has_pothole } => {
-                            let label = has_pothole.then_some(label.as_str());
+                            let label = if has_pothole { &label } else { "" };
                             out.push(self.image(&dest_url, label, true, "", false));
                         }
                         _ => {
                             let link = percent_decode_str(&dest_url).decode_utf8_lossy();
                             let in_link = link_depth > 0;
-                            out.push(self.image(&link, Some(&label), false, &title, in_link));
+                            out.push(self.image(&link, &label, false, &title, in_link));
                         }
                     }
                 }
@@ -248,12 +248,11 @@ impl Renderer<'_> {
     fn image<'a>(
         &mut self,
         link: &str,
-        label: Option<&str>,
+        label: &str,
         is_wikilink: bool,
         title: &str,
         in_link: bool,
     ) -> Event<'a> {
-        let label = label.unwrap_or_default();
         let (alt, size) = if let Some((alt, Some(size))) = label
             .rsplit_once('|')
             .map(|(alt, size)| (alt, size_attrs(size)))
