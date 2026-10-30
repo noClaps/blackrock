@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::ops::Range;
 use std::path::Path;
 
@@ -75,19 +76,7 @@ impl Renderer<'_> {
         while let Some(event) = events.pop() {
             match event {
                 Event::Start(Tag::CodeBlock(kind)) => {
-                    let mut code = String::new();
-                    while let Some(event) = events.pop() {
-                        match event {
-                            Event::Text(text) => code.push_str(&text),
-                            Event::End(TagEnd::CodeBlock) => break,
-                            _ => {}
-                        }
-                    }
-                    let lang = match &kind {
-                        CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
-                        CodeBlockKind::Indented => "",
-                    };
-                    out.push(Event::Html(code_block(lang, &code).into()));
+                    out.push(Event::Html(code_block(&kind, &mut events).into()));
                 }
                 Event::Start(Tag::Link {
                     link_type,
@@ -117,63 +106,27 @@ impl Renderer<'_> {
                     title,
                     ..
                 }) => {
-                    let mut label = String::new();
-                    let mut depth = 0;
-                    while let Some(event) = events.pop() {
-                        match event {
-                            Event::Text(text) | Event::Code(text) => label.push_str(&text),
-                            Event::Start(Tag::Image { .. }) => depth += 1,
-                            Event::End(TagEnd::Image) if depth == 0 => break,
-                            Event::End(TagEnd::Image) => depth -= 1,
-                            _ => {}
+                    let label = image_label(&mut events);
+                    let image = if let LinkType::WikiLink { has_pothole } = link_type {
+                        let label = has_pothole.then_some(label.as_str());
+                        if is_image(&dest_url) {
+                            self.image(&dest_url, label, true, "", link_depth > 0)
+                        } else {
+                            Event::InlineHtml(media_embed(&dest_url, label).into())
                         }
-                    }
-                    let image = match link_type {
-                        LinkType::WikiLink { has_pothole } => {
-                            let label = has_pothole.then_some(label.as_str());
-                            if is_image(&dest_url) {
-                                self.image(&dest_url, label, true, "", link_depth > 0)
-                            } else {
-                                Event::InlineHtml(media_embed(&dest_url, label).into())
-                            }
-                        }
-                        _ => {
-                            let link = percent_decode_str(&dest_url).decode_utf8_lossy();
-                            self.image(&link, Some(&label), false, &title, link_depth > 0)
-                        }
+                    } else {
+                        let link = percent_decode_str(&dest_url).decode_utf8_lossy();
+                        self.image(&link, Some(&label), false, &title, link_depth > 0)
                     };
                     out.push(image);
                 }
                 Event::Start(Tag::BlockQuote(kind)) => {
-                    let callout = match (events.last(), events.iter().rev().nth(1)) {
-                        (Some(Event::Start(Tag::Paragraph)), Some(Event::Text(text))) => {
-                            Callout::parse(text)
-                        }
-                        _ => None,
-                    };
-                    let Some((callout, rest)) = callout else {
-                        quotes.push(None);
+                    let callout = start_callout(&mut events, &mut out);
+                    if callout.is_none() {
                         out.push(Event::Start(Tag::BlockQuote(kind)));
-                        continue;
-                    };
-                    let rest = rest.to_owned();
-                    events.pop(); // Start(Paragraph)
-                    events.pop(); // Text
-                    out.push(Event::Html(callout.open().into()));
-                    if rest.is_empty() {
-                        if matches!(
-                            events.last(),
-                            Some(
-                                Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph)
-                            )
-                        ) {
-                            out.push(Event::Text(callout.default_title().into()));
-                        }
-                    } else {
-                        out.push(Event::Text(rest.into()));
                     }
-                    quotes.push(Some(callout.clone()));
-                    title = Some(callout);
+                    quotes.push(callout.clone());
+                    title = callout;
                 }
                 Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph)
                     if title.is_some() =>
@@ -339,9 +292,9 @@ impl Renderer<'_> {
             html.push('"');
         }
         if let Some((width, height)) = size {
-            html.push_str(&format!(" width=\"{width}\""));
+            write!(html, " width=\"{width}\"").unwrap();
             if let Some(height) = height {
-                html.push_str(&format!(" height=\"{height}\""));
+                write!(html, " height=\"{height}\"").unwrap();
             }
         }
         html.push('>');
@@ -624,6 +577,48 @@ fn strip_comments(markdown: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Takes an image's label (its alt text, or for a wikilink the part after `|`) from the end of
+/// the reversed `events`, up to and including the image's end.
+fn image_label(events: &mut Vec<Event>) -> String {
+    let mut label = String::new();
+    let mut depth = 0;
+    while let Some(event) = events.pop() {
+        match event {
+            Event::Text(text) | Event::Code(text) => label.push_str(&text),
+            Event::Start(Tag::Image { .. }) => depth += 1,
+            Event::End(TagEnd::Image) if depth == 0 => break,
+            Event::End(TagEnd::Image) => depth -= 1,
+            _ => {}
+        }
+    }
+    label
+}
+
+/// Called at the start of a blockquote. If it is a callout, consumes the callout marker from the
+/// reversed `events`, pushes the callout's opening and the start of its title to `out`, and
+/// returns the callout.
+fn start_callout<'a>(events: &mut Vec<Event<'a>>, out: &mut Vec<Event<'a>>) -> Option<Callout> {
+    let (Some(Event::Start(Tag::Paragraph)), Some(Event::Text(text))) =
+        (events.last(), events.iter().rev().nth(1))
+    else {
+        return None;
+    };
+    let (callout, rest) = Callout::parse(text)?;
+    let rest = rest.to_owned();
+    events.pop(); // Start(Paragraph)
+    events.pop(); // Text
+    out.push(Event::Html(callout.open().into()));
+    if !rest.is_empty() {
+        out.push(Event::Text(rest.into()));
+    } else if matches!(
+        events.last(),
+        Some(Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph))
+    ) {
+        out.push(Event::Text(callout.default_title().into()));
+    }
+    Some(callout)
+}
+
 /// An Obsidian callout: a blockquote starting with `[!type]`.
 #[derive(Clone)]
 struct Callout {
@@ -691,7 +686,20 @@ impl Callout {
     }
 }
 
-fn code_block(lang: &str, code: &str) -> String {
+/// Renders a code block, taking its contents from the end of the reversed `events`.
+fn code_block(kind: &CodeBlockKind, events: &mut Vec<Event>) -> String {
+    let mut code = String::new();
+    while let Some(event) = events.pop() {
+        match event {
+            Event::Text(text) => code.push_str(&text),
+            Event::End(TagEnd::CodeBlock) => break,
+            _ => {}
+        }
+    }
+    let lang = match kind {
+        CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
+        CodeBlockKind::Indented => "",
+    };
     let mut html = String::from("<pre><code");
     if !lang.is_empty() {
         html.push_str(" class=\"language-");
@@ -699,9 +707,9 @@ fn code_block(lang: &str, code: &str) -> String {
         html.push('"');
     }
     html.push('>');
-    match highlight::highlight(lang, code) {
+    match highlight::highlight(lang, &code) {
         Some(highlighted) => html.push_str(&highlighted),
-        None => escape_html_body_text(&mut html, code).unwrap(),
+        None => escape_html_body_text(&mut html, &code).unwrap(),
     }
     html.push_str("</code></pre>\n");
     html
