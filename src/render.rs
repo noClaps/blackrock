@@ -98,22 +98,32 @@ impl Renderer<'_> {
                     link_type,
                     dest_url,
                     title,
-                    ..
+                    id,
                 }) => {
                     let label = image_label(&mut events);
-                    let image = if let LinkType::WikiLink { has_pothole } = link_type {
-                        let label = has_pothole.then_some(label.as_str());
-                        if is_image(&dest_url) {
-                            // The parser never puts wikilink images inside links.
-                            self.image(&dest_url, label, true, "", false)
-                        } else {
-                            Event::InlineHtml(media_embed(&dest_url, label).into())
+                    match link_type {
+                        // Other files, like notes, can't be embedded, so they become links.
+                        LinkType::WikiLink { .. } if !is_image(&dest_url) => out.extend([
+                            Event::Start(Tag::Link {
+                                link_type,
+                                dest_url: wikilink_href(&dest_url).into(),
+                                title,
+                                id,
+                            }),
+                            Event::Text(label.into()),
+                            Event::End(TagEnd::Link),
+                        ]),
+                        // The parser never puts wikilink images inside links.
+                        LinkType::WikiLink { has_pothole } => {
+                            let label = has_pothole.then_some(label.as_str());
+                            out.push(self.image(&dest_url, label, true, "", false));
                         }
-                    } else {
-                        let link = percent_decode_str(&dest_url).decode_utf8_lossy();
-                        self.image(&link, Some(&label), false, &title, link_depth > 0)
-                    };
-                    out.push(image);
+                        _ => {
+                            let link = percent_decode_str(&dest_url).decode_utf8_lossy();
+                            let in_link = link_depth > 0;
+                            out.push(self.image(&link, Some(&label), false, &title, in_link));
+                        }
+                    }
                 }
                 Event::Start(Tag::BlockQuote(kind)) => {
                     let callout = start_callout(&mut events, &mut out);
@@ -762,35 +772,6 @@ fn is_image(target: &str) -> bool {
     vault::image_mime_type(Path::new(target.split('#').next().unwrap())).is_some()
 }
 
-/// Renders an Obsidian embed of something other than an image, `![[target]]` or
-/// `![[target|label]]`.
-///
-/// Audio, video and PDFs are embedded. Other files, like notes, can't be transcluded, so they
-/// become links.
-fn media_embed(target: &str, label: Option<&str>) -> String {
-    let path = target.split('#').next().unwrap().trim();
-    let extension = path
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_ascii_lowercase())
-        .unwrap_or_default();
-    let src = href(path);
-    match extension.as_str() {
-        "mp3" | "wav" | "m4a" | "ogg" | "flac" | "3gp" | "oga" | "opus" => {
-            format!("<audio controls src=\"{src}\"></audio>")
-        }
-        "mp4" | "webm" | "ogv" | "mov" | "mkv" => format!("<video controls src=\"{src}\"></video>"),
-        "pdf" => {
-            let title = attr(label.unwrap_or(path.rsplit('/').next().unwrap()));
-            format!("<iframe src=\"{src}\" title=\"{title}\"></iframe>")
-        }
-        _ => format!(
-            "<a class=\"embed\" href=\"{}\">{}</a>",
-            href(&wikilink_href(target)),
-            text(label.unwrap_or(target))
-        ),
-    }
-}
-
 /// Escapes text for an HTML attribute value.
 fn attr(s: &str) -> String {
     let mut out = String::new();
@@ -901,22 +882,14 @@ mod tests {
     }
 
     #[test]
-    fn media_embeds() {
+    fn other_embeds_are_links() {
         assert_eq!(
-            to_html("![[song.mp3]]"),
-            "<p><audio controls src=\"song.mp3\"></audio></p>\n"
+            to_html("![[Other Note#Part]]"),
+            "<p><a href=\"Other%20Note#part\">Other Note#Part</a></p>\n"
         );
         assert_eq!(
-            to_html("![[clip.mp4]]"),
-            "<p><video controls src=\"clip.mp4\"></video></p>\n"
-        );
-        assert_eq!(
-            to_html("![[Other Note]]"),
-            "<p><a class=\"embed\" href=\"Other%20Note\">Other Note</a></p>\n"
-        );
-        assert_eq!(
-            to_html("![[a&b.pdf]]"),
-            "<p><iframe src=\"a&amp;b.pdf\" title=\"a&amp;b.pdf\"></iframe></p>\n"
+            to_html("![[a&b.pdf|The PDF]]"),
+            "<p><a href=\"a&amp;b.pdf\">The PDF</a></p>\n"
         );
     }
 

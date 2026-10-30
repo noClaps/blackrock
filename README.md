@@ -17,12 +17,12 @@ nothing is written to stdout, and the exit status is 1.
 ## Features
 
 - CommonMark plus tables, footnotes, strikethrough and task lists
-- Images (`![[cat.png]]`, `![alt](cat.png)`) are embedded as `data:` URLs. Like Obsidian, they
-  are looked up relative to the note, then the vault root, then anywhere in the vault by name.
-  Remote images (`https://…`) are left as links. Sizes work as in Obsidian:
+- PNG, JPEG, GIF, SVG, WebP and AVIF images (`![[cat.png]]`, `![alt](cat.png)`) are embedded as
+  `data:` URLs. Like Obsidian, they are looked up relative to the note, then the vault root, then
+  anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian:
   `![[cat.png|300]]`, `![[cat.png|A cat|300x200]]`, `![A cat|300](cat.png)`
 - Images with alt text become `<figure>`s with the alt text as the `<figcaption>`
-- Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (audio, video, PDFs, notes as links), callouts
+- Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (embeds of other files become links), callouts
   (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]

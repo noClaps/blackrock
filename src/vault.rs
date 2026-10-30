@@ -116,12 +116,9 @@ pub fn image_mime_type(path: &Path) -> Option<&'static str> {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
-        "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
         "webp" => "image/webp",
         "avif" => "image/avif",
-        "ico" => "image/x-icon",
-        "tif" | "tiff" => "image/tiff",
         _ => return None,
     })
 }
