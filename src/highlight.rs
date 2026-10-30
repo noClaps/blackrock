@@ -8,215 +8,135 @@ use std::sync::LazyLock;
 
 use pulldown_cmark_escape::escape_html_body_text;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+use {
+    tree_sitter_bash as bash, tree_sitter_c as c, tree_sitter_cpp as cpp, tree_sitter_css as css,
+    tree_sitter_go as go, tree_sitter_html as html, tree_sitter_java as java,
+    tree_sitter_javascript as js, tree_sitter_json as json, tree_sitter_python as python,
+    tree_sitter_ruby as ruby, tree_sitter_rust as rust, tree_sitter_toml_ng as toml,
+    tree_sitter_typescript as ts, tree_sitter_yaml as yaml,
+};
 
-/// GitHub's "prettylights" syntax colors (light, dark), from Primer's `light` and `dark` themes.
-mod github {
-    pub const COMMENT: (&str, &str) = ("#59636e", "#9198a1");
-    pub const CONSTANT: (&str, &str) = ("#0550ae", "#79c0ff");
-    pub const ENTITY: (&str, &str) = ("#6639ba", "#d2a8ff");
-    pub const ENTITY_TAG: (&str, &str) = ("#0550ae", "#7ee787");
-    pub const KEYWORD: (&str, &str) = ("#cf222e", "#ff7b72");
-    pub const STRING: (&str, &str) = ("#0a3069", "#a5d6ff");
-    pub const STRING_REGEXP: (&str, &str) = ("#116329", "#7ee787");
-    pub const VARIABLE: (&str, &str) = ("#953800", "#ffa657");
+macro_rules! color {
+    ($light:literal, $dark:literal) => {
+        concat!("color:light-dark(", $light, ",", $dark, ")")
+    };
 }
 
-/// The Tree-sitter captures we recognize, and the GitHub color each maps to.
+// GitHub's "prettylights" syntax colors, from Primer's `light` and `dark` themes.
+const COMMENT: &str = color!("#59636e", "#9198a1");
+const CONSTANT: &str = color!("#0550ae", "#79c0ff");
+const ENTITY: &str = color!("#6639ba", "#d2a8ff");
+const ENTITY_TAG: &str = color!("#0550ae", "#7ee787");
+const KEYWORD: &str = color!("#cf222e", "#ff7b72");
+const STRING: &str = color!("#0a3069", "#a5d6ff");
+const STRING_REGEXP: &str = color!("#116329", "#7ee787");
+const VARIABLE: &str = color!("#953800", "#ffa657");
+
+/// The Tree-sitter captures we recognize, and the style of each.
 ///
 /// Tree-sitter picks the most specific recognized name for each capture, so e.g.
 /// `@function.method.builtin` falls back to `function`. Captures that match nothing here (like
 /// `@variable` or `@punctuation.bracket`) are left uncolored, as on GitHub.
-const CAPTURES: &[(&str, (&str, &str))] = &[
-    ("attribute", github::CONSTANT),
-    ("boolean", github::CONSTANT),
-    ("comment", github::COMMENT),
-    ("constant", github::CONSTANT),
-    ("constant.builtin", github::CONSTANT),
-    ("constructor", github::ENTITY),
-    ("escape", github::STRING_REGEXP),
-    ("function", github::ENTITY),
-    ("function.builtin", github::ENTITY),
-    ("function.macro", github::ENTITY),
-    ("function.method", github::ENTITY),
-    ("keyword", github::KEYWORD),
-    ("label", github::CONSTANT),
-    ("module", github::VARIABLE),
-    ("namespace", github::VARIABLE),
-    ("number", github::CONSTANT),
-    ("operator", github::KEYWORD),
-    ("property", github::CONSTANT),
-    ("punctuation.special", github::KEYWORD),
-    ("string", github::STRING),
-    ("string.escape", github::STRING_REGEXP),
-    ("string.regexp", github::STRING_REGEXP),
-    ("string.special", github::STRING),
-    ("string.special.key", github::CONSTANT),
-    ("string.special.regex", github::STRING_REGEXP),
-    ("string.special.symbol", github::CONSTANT),
-    ("tag", github::ENTITY_TAG),
-    ("type", github::VARIABLE),
-    ("type.builtin", github::KEYWORD),
-    ("variable.builtin", github::CONSTANT),
+const CAPTURES: &[(&str, &str)] = &[
+    ("attribute", CONSTANT),
+    ("boolean", CONSTANT),
+    ("comment", COMMENT),
+    ("constant", CONSTANT),
+    ("constructor", ENTITY),
+    ("escape", STRING_REGEXP),
+    ("function", ENTITY),
+    ("keyword", KEYWORD),
+    ("label", CONSTANT),
+    ("module", VARIABLE),
+    ("namespace", VARIABLE),
+    ("number", CONSTANT),
+    ("operator", KEYWORD),
+    ("property", CONSTANT),
+    ("punctuation.special", KEYWORD),
+    ("string", STRING),
+    ("string.escape", STRING_REGEXP),
+    ("string.regexp", STRING_REGEXP),
+    ("string.special.key", CONSTANT),
+    ("string.special.regex", STRING_REGEXP),
+    ("string.special.symbol", CONSTANT),
+    ("tag", ENTITY_TAG),
+    ("type", VARIABLE),
+    ("type.builtin", KEYWORD),
+    ("variable.builtin", CONSTANT),
 ];
-
-/// The `style` attribute value for each entry of [`CAPTURES`], in the same order.
-static STYLES: LazyLock<Vec<String>> = LazyLock::new(|| {
-    CAPTURES
-        .iter()
-        .map(|(_, (light, dark))| format!("color:light-dark({light},{dark})"))
-        .collect()
-});
 
 /// All supported languages, keyed by their canonical name.
 static LANGUAGES: LazyLock<HashMap<&'static str, HighlightConfiguration>> = LazyLock::new(|| {
-    let javascript_highlights = [
-        tree_sitter_javascript::HIGHLIGHT_QUERY,
-        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-    ]
-    .concat();
-    let typescript_highlights = [
-        tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        tree_sitter_javascript::HIGHLIGHT_QUERY,
-    ]
-    .concat();
-    let tsx_highlights = [
-        typescript_highlights.as_str(),
-        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-    ]
-    .concat();
-    let cpp_highlights = [
-        tree_sitter_cpp::HIGHLIGHT_QUERY,
-        tree_sitter_c::HIGHLIGHT_QUERY,
-    ]
-    .concat();
-    let javascript_locals = tree_sitter_javascript::LOCALS_QUERY;
-    let typescript_locals = [
-        tree_sitter_typescript::LOCALS_QUERY,
-        tree_sitter_javascript::LOCALS_QUERY,
-    ]
-    .concat();
-
-    let definitions = [
-        (
-            "bash",
-            tree_sitter_bash::LANGUAGE.into(),
-            tree_sitter_bash::HIGHLIGHT_QUERY,
-            "",
-            "",
-        ),
-        (
-            "c",
-            tree_sitter_c::LANGUAGE.into(),
-            tree_sitter_c::HIGHLIGHT_QUERY,
-            "",
-            "",
-        ),
+    // TypeScript's and C++'s queries extend JavaScript's and C's.
+    let ts_highlights = [ts::HIGHLIGHTS_QUERY, js::HIGHLIGHT_QUERY].concat();
+    let ts_locals = [ts::LOCALS_QUERY, js::LOCALS_QUERY].concat();
+    let languages = [
+        ("bash", bash::LANGUAGE, bash::HIGHLIGHT_QUERY, "", ""),
+        ("c", c::LANGUAGE, c::HIGHLIGHT_QUERY, "", ""),
         (
             "cpp",
-            tree_sitter_cpp::LANGUAGE.into(),
-            &cpp_highlights,
+            cpp::LANGUAGE,
+            &[cpp::HIGHLIGHT_QUERY, c::HIGHLIGHT_QUERY].concat(),
             "",
             "",
         ),
-        (
-            "css",
-            tree_sitter_css::LANGUAGE.into(),
-            tree_sitter_css::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
-        (
-            "go",
-            tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+        ("css", css::LANGUAGE, css::HIGHLIGHTS_QUERY, "", ""),
+        ("go", go::LANGUAGE, go::HIGHLIGHTS_QUERY, "", ""),
         (
             "html",
-            tree_sitter_html::LANGUAGE.into(),
-            tree_sitter_html::HIGHLIGHTS_QUERY,
-            tree_sitter_html::INJECTIONS_QUERY,
+            html::LANGUAGE,
+            html::HIGHLIGHTS_QUERY,
+            html::INJECTIONS_QUERY,
             "",
         ),
-        (
-            "java",
-            tree_sitter_java::LANGUAGE.into(),
-            tree_sitter_java::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+        ("java", java::LANGUAGE, java::HIGHLIGHTS_QUERY, "", ""),
         (
             "javascript",
-            tree_sitter_javascript::LANGUAGE.into(),
-            &javascript_highlights,
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            javascript_locals,
+            js::LANGUAGE,
+            &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY].concat(),
+            js::INJECTIONS_QUERY,
+            js::LOCALS_QUERY,
         ),
-        (
-            "json",
-            tree_sitter_json::LANGUAGE.into(),
-            tree_sitter_json::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
-        (
-            "python",
-            tree_sitter_python::LANGUAGE.into(),
-            tree_sitter_python::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+        ("json", json::LANGUAGE, json::HIGHLIGHTS_QUERY, "", ""),
+        ("python", python::LANGUAGE, python::HIGHLIGHTS_QUERY, "", ""),
         (
             "ruby",
-            tree_sitter_ruby::LANGUAGE.into(),
-            tree_sitter_ruby::HIGHLIGHTS_QUERY,
+            ruby::LANGUAGE,
+            ruby::HIGHLIGHTS_QUERY,
             "",
-            tree_sitter_ruby::LOCALS_QUERY,
+            ruby::LOCALS_QUERY,
         ),
         (
             "rust",
-            tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-            tree_sitter_rust::INJECTIONS_QUERY,
+            rust::LANGUAGE,
+            rust::HIGHLIGHTS_QUERY,
+            rust::INJECTIONS_QUERY,
             "",
         ),
-        (
-            "toml",
-            tree_sitter_toml_ng::LANGUAGE.into(),
-            tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+        ("toml", toml::LANGUAGE, toml::HIGHLIGHTS_QUERY, "", ""),
         (
             "tsx",
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            &tsx_highlights,
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            &typescript_locals,
+            ts::LANGUAGE_TSX,
+            &[&ts_highlights, js::JSX_HIGHLIGHT_QUERY].concat(),
+            js::INJECTIONS_QUERY,
+            &ts_locals,
         ),
         (
             "typescript",
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            &typescript_highlights,
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            &typescript_locals,
+            ts::LANGUAGE_TYPESCRIPT,
+            &ts_highlights,
+            js::INJECTIONS_QUERY,
+            &ts_locals,
         ),
-        (
-            "yaml",
-            tree_sitter_yaml::LANGUAGE.into(),
-            tree_sitter_yaml::HIGHLIGHTS_QUERY,
-            "",
-            "",
-        ),
+        ("yaml", yaml::LANGUAGE, yaml::HIGHLIGHTS_QUERY, "", ""),
     ];
 
     let names: Vec<&str> = CAPTURES.iter().map(|(name, _)| *name).collect();
-    definitions
+    languages
         .into_iter()
         .map(|(name, language, highlights, injections, locals)| {
             let mut config =
-                HighlightConfiguration::new(language, name, highlights, injections, locals)
+                HighlightConfiguration::new(language.into(), name, highlights, injections, locals)
                     .unwrap_or_else(|e| panic!("invalid {name} highlight query: {e}"));
             config.configure(&names);
             (name, config)
@@ -259,12 +179,12 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
         })
         .ok()?;
 
-    let mut html = String::with_capacity(code.len() * 2);
+    let mut html = String::new();
     for event in events {
         match event.ok()? {
             HighlightEvent::HighlightStart(h) => {
                 html.push_str("<span style=\"");
-                html.push_str(&STYLES[h.0]);
+                html.push_str(CAPTURES[h.0].1);
                 html.push_str("\">");
             }
             HighlightEvent::HighlightEnd => html.push_str("</span>"),
