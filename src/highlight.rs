@@ -3,9 +3,8 @@
 //! Each highlighted token is wrapped in a `<span>` with an inline `color: light-dark(…)` style, so
 //! the colors follow the page's `color-scheme`.
 
-use std::collections::HashMap;
 use std::io::Write;
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use tree_sitter_highlight::{HighlightConfiguration, Highlighter, HtmlRenderer};
 use {
@@ -65,84 +64,102 @@ const CAPTURES: &[(&str, &str)] = &[
     ("variable.builtin", CONSTANT),
 ];
 
-/// All supported languages, keyed by their Shiki language id.
-static LANGUAGES: LazyLock<HashMap<&'static str, HighlightConfiguration>> = LazyLock::new(|| {
+/// All supported languages, by their Shiki language id.
+const LANGUAGES: [&str; 16] = [
+    "c",
+    "cpp",
+    "css",
+    "go",
+    "html",
+    "java",
+    "javascript",
+    "json",
+    "python",
+    "ruby",
+    "rust",
+    "shellscript",
+    "toml",
+    "tsx",
+    "typescript",
+    "yaml",
+];
+
+/// Each language's highlight configuration, in the order of [`LANGUAGES`]. They are only built
+/// when first used, since compiling a language's queries takes tens of milliseconds.
+static CONFIGS: [OnceLock<HighlightConfiguration>; LANGUAGES.len()] =
+    [const { OnceLock::new() }; LANGUAGES.len()];
+
+/// Returns the highlight configuration for a language name or alias, if it is supported.
+fn config(lang: &str) -> Option<&'static HighlightConfiguration> {
+    let id = shiki_id(lang)?;
+    let index = LANGUAGES.iter().position(|&known| known == id)?;
+    Some(CONFIGS[index].get_or_init(|| load(id)))
+}
+
+/// Builds the highlight configuration for a language in [`LANGUAGES`].
+fn load(id: &str) -> HighlightConfiguration {
     // TypeScript's and C++'s queries extend JavaScript's and C's.
-    let ts_highlights = [ts::HIGHLIGHTS_QUERY, js::HIGHLIGHT_QUERY].concat();
-    let ts_locals = [ts::LOCALS_QUERY, js::LOCALS_QUERY].concat();
-    let languages = [
-        ("shellscript", bash::LANGUAGE, bash::HIGHLIGHT_QUERY, "", ""),
-        ("c", c::LANGUAGE, c::HIGHLIGHT_QUERY, "", ""),
-        (
-            "cpp",
-            cpp::LANGUAGE,
-            &[cpp::HIGHLIGHT_QUERY, c::HIGHLIGHT_QUERY].concat(),
-            "",
-            "",
-        ),
-        ("css", css::LANGUAGE, css::HIGHLIGHTS_QUERY, "", ""),
-        ("go", go::LANGUAGE, go::HIGHLIGHTS_QUERY, "", ""),
-        (
-            "html",
+    let cpp_highlights = [cpp::HIGHLIGHT_QUERY, c::HIGHLIGHT_QUERY].concat();
+    let js_highlights = [js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY].concat();
+    let typescript_highlights = [ts::HIGHLIGHTS_QUERY, js::HIGHLIGHT_QUERY].concat();
+    let tsx_highlights = [&typescript_highlights, js::JSX_HIGHLIGHT_QUERY].concat();
+    let typescript_locals = [ts::LOCALS_QUERY, js::LOCALS_QUERY].concat();
+    let (language, highlights, injections, locals) = match id {
+        "c" => (c::LANGUAGE, c::HIGHLIGHT_QUERY, "", ""),
+        "cpp" => (cpp::LANGUAGE, cpp_highlights.as_str(), "", ""),
+        "css" => (css::LANGUAGE, css::HIGHLIGHTS_QUERY, "", ""),
+        "go" => (go::LANGUAGE, go::HIGHLIGHTS_QUERY, "", ""),
+        "html" => (
             html::LANGUAGE,
             html::HIGHLIGHTS_QUERY,
             html::INJECTIONS_QUERY,
             "",
         ),
-        ("java", java::LANGUAGE, java::HIGHLIGHTS_QUERY, "", ""),
-        (
-            "javascript",
+        "java" => (java::LANGUAGE, java::HIGHLIGHTS_QUERY, "", ""),
+        "javascript" => (
             js::LANGUAGE,
-            &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY].concat(),
+            js_highlights.as_str(),
             js::INJECTIONS_QUERY,
             js::LOCALS_QUERY,
         ),
-        ("json", json::LANGUAGE, json::HIGHLIGHTS_QUERY, "", ""),
-        ("python", python::LANGUAGE, python::HIGHLIGHTS_QUERY, "", ""),
-        (
-            "ruby",
+        "json" => (json::LANGUAGE, json::HIGHLIGHTS_QUERY, "", ""),
+        "python" => (python::LANGUAGE, python::HIGHLIGHTS_QUERY, "", ""),
+        "ruby" => (
             ruby::LANGUAGE,
             ruby::HIGHLIGHTS_QUERY,
             "",
             ruby::LOCALS_QUERY,
         ),
-        (
-            "rust",
+        "rust" => (
             rust::LANGUAGE,
             rust::HIGHLIGHTS_QUERY,
             rust::INJECTIONS_QUERY,
             "",
         ),
-        ("toml", toml::LANGUAGE, toml::HIGHLIGHTS_QUERY, "", ""),
-        (
-            "tsx",
+        "shellscript" => (bash::LANGUAGE, bash::HIGHLIGHT_QUERY, "", ""),
+        "toml" => (toml::LANGUAGE, toml::HIGHLIGHTS_QUERY, "", ""),
+        "tsx" => (
             ts::LANGUAGE_TSX,
-            &[&ts_highlights, js::JSX_HIGHLIGHT_QUERY].concat(),
+            tsx_highlights.as_str(),
             js::INJECTIONS_QUERY,
-            &ts_locals,
+            typescript_locals.as_str(),
         ),
-        (
-            "typescript",
+        "typescript" => (
             ts::LANGUAGE_TYPESCRIPT,
-            &ts_highlights,
+            typescript_highlights.as_str(),
             js::INJECTIONS_QUERY,
-            &ts_locals,
+            typescript_locals.as_str(),
         ),
-        ("yaml", yaml::LANGUAGE, yaml::HIGHLIGHTS_QUERY, "", ""),
-    ];
-
+        "yaml" => (yaml::LANGUAGE, yaml::HIGHLIGHTS_QUERY, "", ""),
+        _ => unreachable!("unknown language {id}"),
+    };
+    let mut config =
+        HighlightConfiguration::new(language.into(), id, highlights, injections, locals)
+            .unwrap_or_else(|e| panic!("invalid {id} highlight query: {e}"));
     let names: Vec<&str> = CAPTURES.iter().map(|(name, _)| *name).collect();
-    languages
-        .into_iter()
-        .map(|(name, language, highlights, injections, locals)| {
-            let mut config =
-                HighlightConfiguration::new(language.into(), name, highlights, injections, locals)
-                    .unwrap_or_else(|e| panic!("invalid {name} highlight query: {e}"));
-            config.configure(&names);
-            (name, config)
-        })
-        .collect()
-});
+    config.configure(&names);
+    config
+}
 
 /// Maps a code block's info string (or an injected language name) to a supported language's
 /// Shiki id, accepting the same ids and aliases as Shiki.
@@ -173,11 +190,10 @@ fn shiki_id(lang: &str) -> Option<&'static str> {
 ///
 /// Returns `None` if the language is not supported or the code could not be highlighted.
 pub fn highlight(lang: &str, code: &str) -> Option<String> {
-    let config = LANGUAGES.get(shiki_id(lang)?)?;
     let mut highlighter = Highlighter::new();
     let events = highlighter
-        .highlight(config, code.as_bytes(), None, None, |injected| {
-            LANGUAGES.get(shiki_id(injected)?)
+        .highlight(config(lang)?, code.as_bytes(), None, None, |injected| {
+            config(injected)
         })
         .ok()?;
 
@@ -197,13 +213,15 @@ mod tests {
 
     #[test]
     fn all_languages_load() {
-        assert_eq!(LANGUAGES.len(), 16);
+        for id in LANGUAGES {
+            assert!(config(id).is_some(), "{id}");
+        }
     }
 
     #[test]
     fn uses_shiki_ids_and_aliases() {
-        for id in LANGUAGES.keys() {
-            assert_eq!(shiki_id(id), Some(*id));
+        for id in LANGUAGES {
+            assert_eq!(shiki_id(id), Some(id));
         }
         for (alias, id) in [
             ("bash", "shellscript"),
