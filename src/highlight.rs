@@ -4,6 +4,7 @@
 //! the colors follow the page's `color-scheme`.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::LazyLock;
 
 use tree_sitter_highlight::{HighlightConfiguration, Highlighter, HtmlRenderer};
@@ -183,9 +184,8 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
     let mut renderer = HtmlRenderer::new();
     renderer
         .render(events, code.as_bytes(), &|h, html| {
-            html.extend(b"style=\"");
-            html.extend(CAPTURES[h.0].1.as_bytes());
-            html.extend(b"\"");
+            // Writing to a `Vec` can't fail.
+            let _ = write!(html, "style=\"{}\"", CAPTURES[h.0].1);
         })
         .ok()?;
     String::from_utf8(renderer.html).ok()
