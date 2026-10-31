@@ -50,16 +50,14 @@ binaries need glibc, so they don't run on Alpine.
   (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]
-- Code blocks highlighted with Tree-sitter using GitHub's colors, as inline
-  `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements get no styles.
-  Languages use [Shiki]'s ids and aliases: `c`, `cpp` (`c++`), `css`, `go`, `html` (with embedded
-  JavaScript and CSS), `java`, `javascript` (`js`, `cjs`, `mjs`), `json`, `jsx`, `python` (`py`),
-  `ruby` (`rb`), `rust` (`rs`), `shellscript` (`bash`, `sh`, `shell`, `zsh`), `toml`, `tsx`,
-  `typescript` (`ts`, `cts`, `mts`) and `yaml` (`yml`)
+- Code blocks highlighted with [giallo] using [Shiki]'s grammars and Xcode's default light and dark
+  themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements
+  get no styles. Every language Shiki bundles is supported, by its Shiki id or alias
 
 `light-dark()` picks a color based on the element's used color scheme, so the page needs to
 declare which schemes it supports, e.g. `:root { color-scheme: light dark; }`.
 
 [MathML Core]: https://www.w3.org/TR/mathml-core/
 [math-core]: https://github.com/tmke8/math-core
+[giallo]: https://github.com/getzola/giallo
 [Shiki]: https://shiki.style/languages
