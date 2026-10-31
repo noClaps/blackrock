@@ -6,8 +6,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use pulldown_cmark_escape::escape_html_body_text;
-use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+use tree_sitter_highlight::{HighlightConfiguration, Highlighter, HtmlRenderer};
 use {
     tree_sitter_bash as bash, tree_sitter_c as c, tree_sitter_cpp as cpp, tree_sitter_css as css,
     tree_sitter_go as go, tree_sitter_html as html, tree_sitter_java as java,
@@ -181,21 +180,15 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
         })
         .ok()?;
 
-    let mut html = String::new();
-    for event in events {
-        match event.ok()? {
-            HighlightEvent::HighlightStart(h) => {
-                html.push_str("<span style=\"");
-                html.push_str(CAPTURES[h.0].1);
-                html.push_str("\">");
-            }
-            HighlightEvent::HighlightEnd => html.push_str("</span>"),
-            HighlightEvent::Source { start, end } => {
-                escape_html_body_text(&mut html, &code[start..end]).ok()?;
-            }
-        }
-    }
-    Some(html)
+    let mut renderer = HtmlRenderer::new();
+    renderer
+        .render(events, code.as_bytes(), &|h, html| {
+            html.extend(b"style=\"");
+            html.extend(CAPTURES[h.0].1.as_bytes());
+            html.extend(b"\"");
+        })
+        .ok()?;
+    String::from_utf8(renderer.html).ok()
 }
 
 #[cfg(test)]
