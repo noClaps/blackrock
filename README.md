@@ -50,14 +50,14 @@ binaries need glibc, so they don't run on Alpine.
   (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]
-- Code blocks highlighted with [giallo] using [Shiki]'s grammars and Xcode's default light and dark
-  themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements
-  get no styles. Every language Shiki bundles is supported, by its Shiki id or alias
+- Code blocks highlighted with [Irosashi] using [Shiki]'s grammars and Xcode's default light and
+  dark themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>`
+  elements get no styles. Every language Shiki bundles is supported, by its Shiki id or alias
 
 `light-dark()` picks a color based on the element's used color scheme, so the page needs to
 declare which schemes it supports, e.g. `:root { color-scheme: light dark; }`.
 
 [MathML Core]: https://www.w3.org/TR/mathml-core/
 [math-core]: https://github.com/tmke8/math-core
-[giallo]: https://github.com/getzola/giallo
+[Irosashi]: https://github.com/frostybee/irosashi
 [Shiki]: https://shiki.style/languages
