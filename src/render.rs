@@ -200,14 +200,9 @@ impl Renderer<'_> {
                 *start = Event::Html("".into());
                 end = Event::Html("\n".into());
             }
-            Some(start @ Event::Start(Tag::Paragraph | Tag::Item)) => {
+            Some(Event::Start(Tag::Paragraph | Tag::Item)) => {
                 if let Some(block_id) = strip_block_id(&mut run) {
-                    let tag = if *start == Event::Start(Tag::Paragraph) {
-                        "p"
-                    } else {
-                        "li"
-                    };
-                    *start = Event::Html(format!("<{tag} id=\"{}\">", attr(&block_id)).into());
+                    out.insert(out.len() - 1, block_id_marker(&block_id));
                 }
             }
             _ => {}
@@ -441,8 +436,7 @@ fn standalone_block_ids(mut events: Vec<Event>) -> Vec<Event> {
             _ => None,
         };
         if let (Some(id), Some(Some(start))) = (id, last_child.last()) {
-            // NUL never appears in the output otherwise, since the parser replaces it.
-            out.insert(*start, Event::Html(format!("\0{id}\0\n").into()));
+            out.insert(*start, block_id_marker(id));
             events.pop(); // Text
             events.pop(); // End(Paragraph)
             continue;
@@ -463,7 +457,13 @@ fn standalone_block_ids(mut events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// Replaces each marker left by [`standalone_block_ids`] with an `id` on the element after it,
+/// A marker that [`add_block_ids`] turns into an `id` on the opening tag of the element after it.
+fn block_id_marker<'a>(id: &str) -> Event<'a> {
+    // NUL never appears in the output otherwise, since the parser replaces it.
+    Event::Html(format!("\0{id}\0\n").into())
+}
+
+/// Replaces each [`block_id_marker`] with an `id` on the element after it,
 /// unless that element already has one.
 fn add_block_ids(html: &str) -> String {
     let mut out = String::new();
