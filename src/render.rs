@@ -1,6 +1,7 @@
 //! Markdown to HTML rendering, with Obsidian's extensions to markdown.
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::ops::Range;
 use std::path::Path;
 
@@ -478,10 +479,8 @@ fn add_block_ids(html: &str) -> String {
             let name_end = 1 + name
                 .find(|c: char| !c.is_ascii_alphanumeric())
                 .unwrap_or(name.len());
-            out.push_str(&after[..name_end]);
-            out.push_str(" id=\"");
-            out.push_str(id);
-            out.push('"');
+            // Writing to a `String` can't fail.
+            let _ = write!(out, "{} id=\"{id}\"", &after[..name_end]);
             rest = &after[name_end..];
         }
     }
