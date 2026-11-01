@@ -20,16 +20,16 @@ This repository is an action that downloads a release binary for the runner (Lin
 x86-64 or ARM64) and adds it to the `PATH`. It works on GitHub Actions:
 
 ```yaml
-- uses: noClaps/blackrock@v0.2.1
+- uses: noClaps/blackrock@v0.3.0
   with:
-    version: v0.2.1 # optional, defaults to the latest release
+    version: v0.3.0 # optional, defaults to the latest release
 - run: blackrock notes/note.md > note.html
 ```
 
 And on Forgejo Actions, using the full URL:
 
 ```yaml
-- uses: https://github.com/noClaps/blackrock@v0.2.1
+- uses: https://github.com/noClaps/blackrock@v0.3.0
 ```
 
 The `version` input picks which release binary to install; the tag after `@` only picks the
