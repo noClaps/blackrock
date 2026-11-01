@@ -154,6 +154,15 @@ impl Renderer<'_> {
                     Some(callout) => out.push(Event::Html(callout.close().into())),
                     None => out.push(Event::End(TagEnd::BlockQuote(kind))),
                 },
+                // Tables are wrapped in a `<div>`, like math blocks.
+                event @ Event::Start(Tag::Table(_)) => {
+                    out.push(Event::Html("<div>\n".into()));
+                    out.push(event);
+                }
+                event @ Event::End(TagEnd::Table) => {
+                    out.push(event);
+                    out.push(Event::Html("</div>\n".into()));
+                }
                 event => out.push(event),
             }
         }
@@ -193,12 +202,12 @@ impl Renderer<'_> {
             Some(Event::Start(Tag::Heading { id: id @ None, .. })) => {
                 *id = Some(self.unique_id(slugify(&plain_text(&run))).into());
             }
-            // A `$$…$$` block on its own is rendered without a surrounding paragraph.
+            // A `$$…$$` block on its own is rendered in a `<div>` instead of a paragraph.
             Some(start @ Event::Start(Tag::Paragraph))
                 if is_display_math_only(&run) && end == Event::End(TagEnd::Paragraph) =>
             {
-                *start = Event::Html("".into());
-                end = Event::Html("\n".into());
+                *start = Event::Html("<div>".into());
+                end = Event::Html("</div>\n".into());
             }
             Some(Event::Start(Tag::Paragraph | Tag::Item)) => {
                 if let Some(block_id) = strip_block_id(&mut run) {
@@ -851,7 +860,9 @@ fn footnotes(events: Vec<Event>) -> Vec<Event> {
     if numbers.labels.is_empty() {
         return out;
     }
-    out.push(Event::Html("<section class=\"footnotes\">\n<hr />\n<ol>\n".into()));
+    out.push(Event::Html(
+        "<section class=\"footnotes\">\n<hr />\n<ol>\n".into(),
+    ));
     // Outputting a definition can reference more footnotes, which are added to the end.
     let mut index = 0;
     while let Some(label) = numbers.labels.get(index) {
@@ -1045,12 +1056,13 @@ mod tests {
     #[test]
     fn renders_math() {
         assert_eq!(to_html("$x$\n"), "<p><math><mi>x</mi></math></p>\n");
-        // A `$$` block on its own isn't wrapped in a paragraph.
-        let html = to_html("$$\nx\n$$\n");
-        assert!(html.starts_with("<math display=\"block\">"), "{html}");
-        assert!(html.ends_with("</math>\n"), "{html}");
+        // A `$$` block on its own is wrapped in a `<div>` instead of a paragraph.
+        assert_eq!(
+            to_html("$$\nx\n$$\n"),
+            "<div><math display=\"block\"><mi>x</mi></math></div>\n"
+        );
         let html = to_html("$$a$$ $$b$$");
-        assert!(html.starts_with("<math display=\"block\">"), "{html}");
+        assert!(html.starts_with("<div><math display=\"block\">"), "{html}");
         // With other text, it stays in the paragraph.
         let html = to_html("a $$x$$");
         assert!(html.starts_with("<p>a <math display=\"block\">"), "{html}");
@@ -1076,7 +1088,7 @@ mod tests {
     fn gfm_extensions() {
         assert_eq!(
             to_html("| a |\n| - |\n| b |\n\n~~s~~ x[^1]\n\n- [ ] t\n\n[^1]: n"),
-            "<table><thead><tr><th>a</th></tr></thead><tbody>\n<tr><td>b</td></tr>\n</tbody></table>\n\
+            "<div>\n<table><thead><tr><th>a</th></tr></thead><tbody>\n<tr><td>b</td></tr>\n</tbody></table>\n</div>\n\
              <p><del>s</del> x<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup></p>\n\
              <ul>\n<li><input disabled=\"\" type=\"checkbox\"/>\nt</li>\n</ul>\n\
              <section class=\"footnotes\">\n<hr />\n<ol>\n<li id=\"fn-1\">\n\
@@ -1485,12 +1497,12 @@ mod tests {
     fn standalone_block_ids_go_on_the_previous_block() {
         assert_eq!(
             to_html("$$\nx\n$$\n\n^math"),
-            "<math id=\"math\" display=\"block\"><mi>x</mi></math>\n"
+            "<div id=\"math\"><math display=\"block\"><mi>x</mi></math></div>\n"
         );
         assert_eq!(
             to_html("| a |\n|--:|\n| 1 |\n\n^t"),
-            "<table id=\"t\"><thead><tr><th style=\"text-align: right\">a</th></tr></thead>\
-             <tbody>\n<tr><td style=\"text-align: right\">1</td></tr>\n</tbody></table>\n"
+            "<div id=\"t\">\n<table><thead><tr><th style=\"text-align: right\">a</th></tr></thead>\
+             <tbody>\n<tr><td style=\"text-align: right\">1</td></tr>\n</tbody></table>\n</div>\n"
         );
         assert_eq!(
             to_html("> [!tip]- Hi\n> body\n\n^c"),

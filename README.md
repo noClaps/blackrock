@@ -38,7 +38,7 @@ binaries need glibc, so they don't run on Alpine.
 
 ## Features
 
-- CommonMark plus tables, footnotes, strikethrough and task lists
+- CommonMark plus tables, footnotes, strikethrough and task lists. Tables are wrapped in a `<div>`
 - PNG, JPEG, GIF, SVG, WebP and AVIF images (`![[cat.png]]`, `![alt](cat.png)`) are embedded as
   `data:` URLs. Like Obsidian, they are looked up relative to the note, then the vault root, then
   anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian:
@@ -52,7 +52,8 @@ binaries need glibc, so they don't run on Alpine.
 - Footnotes (`[^1]`) are numbered in the order they're first referenced and collected at the end
   in a `<section class="footnotes">`, after an `<hr />`, each with a link back to its first
   reference
-- Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]
+- Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]. A
+  `$$…$$` block on its own line is wrapped in a `<div>`
 - Code blocks highlighted with [Irosashi] using [Shiki]'s grammars and Xcode's default light and
   dark themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>`
   elements get no styles. Every language Shiki bundles is supported, by its Shiki id or alias
