@@ -830,8 +830,7 @@ fn footnotes(events: Vec<Event>) -> Vec<Event> {
     let mut definitions = HashMap::new();
     // The definition being collected, if any.
     let mut definition: Option<(CowStr, Vec<Event>)> = None;
-    // Referenced labels, in the order they are first referenced.
-    let mut labels = Vec::new();
+    let mut numbers = FootnoteNumbers::default();
     for event in events {
         match event {
             Event::Start(Tag::FootnoteDefinition(label)) => definition = Some((label, Vec::new())),
@@ -844,18 +843,18 @@ fn footnotes(events: Vec<Event>) -> Vec<Event> {
             // references in unused definitions don't count.
             event => match &mut definition {
                 Some((_, body)) => body.push(event),
-                None => out.push(footnote_reference(event, &mut labels)),
+                None => out.push(numbers.reference(event)),
             },
         }
     }
 
-    if labels.is_empty() {
+    if numbers.labels.is_empty() {
         return out;
     }
     out.push(Event::Html("<section class=\"footnotes\">\n<hr />\n<ol>\n".into()));
     // Outputting a definition can reference more footnotes, which are added to the end.
     let mut index = 0;
-    while let Some(label) = labels.get(index) {
+    while let Some(label) = numbers.labels.get(index) {
         index += 1;
         let mut body = definitions.remove(label).unwrap_or_default();
         out.push(Event::Html(format!("<li id=\"fn-{index}\">\n").into()));
@@ -875,7 +874,7 @@ fn footnotes(events: Vec<Event>) -> Vec<Event> {
             body.push(Event::End(TagEnd::Paragraph));
         }
         for event in body {
-            out.push(footnote_reference(event, &mut labels));
+            out.push(numbers.reference(event));
         }
         out.push(Event::Html("</li>\n".into()));
     }
@@ -883,21 +882,34 @@ fn footnotes(events: Vec<Event>) -> Vec<Event> {
     out
 }
 
-/// Renders a footnote reference as a link to its footnote, numbering it if it is the first
-/// reference to it. Other events are returned unchanged.
-fn footnote_reference<'a>(event: Event<'a>, labels: &mut Vec<CowStr<'a>>) -> Event<'a> {
-    let Event::FootnoteReference(label) = event else {
-        return event;
-    };
-    let (n, id) = if let Some(index) = labels.iter().position(|l| *l == label) {
-        (index + 1, String::new())
-    } else {
-        labels.push(label);
-        (labels.len(), format!(" id=\"fnref-{}\"", labels.len()))
-    };
-    Event::InlineHtml(
-        format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>").into(),
-    )
+/// Footnote numbers, assigned in the order footnotes are first referenced.
+#[derive(Default)]
+struct FootnoteNumbers<'a> {
+    /// Referenced labels, in order.
+    labels: Vec<CowStr<'a>>,
+    /// Each referenced label's number.
+    numbers: HashMap<CowStr<'a>, usize>,
+}
+
+impl<'a> FootnoteNumbers<'a> {
+    /// Renders a footnote reference as a link to its footnote, numbering it if it is the first
+    /// reference to it. Other events are returned unchanged.
+    fn reference(&mut self, event: Event<'a>) -> Event<'a> {
+        let Event::FootnoteReference(label) = event else {
+            return event;
+        };
+        let (n, id) = if let Some(&n) = self.numbers.get(&label) {
+            (n, String::new())
+        } else {
+            let n = self.labels.len() + 1;
+            self.labels.push(label.clone());
+            self.numbers.insert(label, n);
+            (n, format!(" id=\"fnref-{n}\""))
+        };
+        Event::InlineHtml(
+            format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>").into(),
+        )
+    }
 }
 
 /// Moves figures (the only block-level HTML inside paragraphs) out of their paragraphs, splitting
