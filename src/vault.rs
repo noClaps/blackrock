@@ -1,14 +1,16 @@
 //! Finding files in an Obsidian vault.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct Vault {
     /// The canonicalized vault root.
     root: PathBuf,
-    /// All files in the vault, sorted. Collected on first use.
-    files: OnceCell<Vec<PathBuf>>,
+    /// All files in the vault, sorted and grouped by file name. Collected on first use.
+    files_by_name: OnceCell<HashMap<OsString, Vec<PathBuf>>>,
 }
 
 impl Vault {
@@ -26,7 +28,7 @@ impl Vault {
             .map_err(|e| format!("cannot open vault {}: {e}", root.display()))?;
         Ok(Self {
             root,
-            files: OnceCell::new(),
+            files_by_name: OnceCell::new(),
         })
     }
 
@@ -66,7 +68,9 @@ impl Vault {
             }
         }
 
-        self.files()
+        // Only files with the link's file name can end with the link.
+        self.files_by_name()
+            .get(relative.file_name()?)?
             .iter()
             .filter(|file| {
                 file.strip_prefix(&self.root)
@@ -76,12 +80,18 @@ impl Vault {
             .cloned()
     }
 
-    fn files(&self) -> &[PathBuf] {
-        self.files.get_or_init(|| {
+    fn files_by_name(&self) -> &HashMap<OsString, Vec<PathBuf>> {
+        self.files_by_name.get_or_init(|| {
             let mut files = Vec::new();
             collect_files(&self.root, &mut files);
             files.sort();
-            files
+            let mut by_name: HashMap<_, Vec<_>> = HashMap::new();
+            for file in files {
+                if let Some(name) = file.file_name() {
+                    by_name.entry(name.to_owned()).or_default().push(file);
+                }
+            }
+            by_name
         })
     }
 }
