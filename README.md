@@ -49,6 +49,9 @@ binaries need glibc, so they don't run on Alpine.
 - Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (embeds of other files become links), callouts
   (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
+- Footnotes (`[^1]`) are numbered in the order they're first referenced and collected at the end
+  in a `<section class="footnotes">`, after an `<hr />`, each with a link back to its first
+  reference
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core] with [math-core]
 - Code blocks highlighted with [Irosashi] using [Shiki]'s grammars and Xcode's default light and
   dark themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>`

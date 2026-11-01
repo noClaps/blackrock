@@ -8,7 +8,7 @@ use std::path::Path;
 use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
 use percent_encoding::percent_decode_str;
 use pulldown_cmark::{
-    CodeBlockKind, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
+    CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
 };
 use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text};
 
@@ -46,7 +46,7 @@ pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String,
     };
     let events = renderer.blocks(events);
     let events = hoist_figures(events);
-    let events = renderer.inlines(events);
+    let events = footnotes(renderer.inlines(events));
     if !renderer.errors.is_empty() {
         return Err(renderer.errors);
     }
@@ -814,6 +814,84 @@ fn slugify(text: &str) -> String {
     }
 }
 
+/// Moves footnote definitions into a list at the end of the document, numbered in the order
+/// they are first referenced, each with a link back to its first reference. Definitions that are
+/// never referenced are dropped, as on GitHub.
+fn footnotes(events: Vec<Event>) -> Vec<Event> {
+    let mut out = Vec::new();
+    let mut definitions = HashMap::new();
+    // The definition being collected, if any.
+    let mut definition: Option<(CowStr, Vec<Event>)> = None;
+    // Referenced labels, in the order they are first referenced.
+    let mut labels = Vec::new();
+    for event in events {
+        match event {
+            Event::Start(Tag::FootnoteDefinition(label)) => definition = Some((label, Vec::new())),
+            Event::End(TagEnd::FootnoteDefinition) => {
+                let (label, body) = definition.take().expect("definitions don't nest");
+                // Like links, the first definition of a label wins.
+                definitions.entry(label).or_insert(body);
+            }
+            // References in definitions are numbered when the definition is output, so that
+            // references in unused definitions don't count.
+            event => match &mut definition {
+                Some((_, body)) => body.push(event),
+                None => out.push(footnote_reference(event, &mut labels)),
+            },
+        }
+    }
+
+    if labels.is_empty() {
+        return out;
+    }
+    out.push(Event::Html("<section class=\"footnotes\">\n<hr />\n<ol>\n".into()));
+    // Outputting a definition can reference more footnotes, which are added to the end.
+    let mut index = 0;
+    while let Some(label) = labels.get(index) {
+        index += 1;
+        let mut body = definitions.remove(label).unwrap_or_default();
+        out.push(Event::Html(format!("<li id=\"fn-{index}\">\n").into()));
+        let backref = format!(
+            "<a href=\"#fnref-{index}\" class=\"footnote-backref\" \
+             aria-label=\"Back to reference {index}\">\u{21a9}\u{fe0e}</a>"
+        );
+        // The link back goes at the end of the last paragraph, or in a paragraph of its own.
+        if body.last() == Some(&Event::End(TagEnd::Paragraph)) {
+            body.insert(
+                body.len() - 1,
+                Event::InlineHtml(format!(" {backref}").into()),
+            );
+        } else {
+            body.push(Event::Start(Tag::Paragraph));
+            body.push(Event::InlineHtml(backref.into()));
+            body.push(Event::End(TagEnd::Paragraph));
+        }
+        for event in body {
+            out.push(footnote_reference(event, &mut labels));
+        }
+        out.push(Event::Html("</li>\n".into()));
+    }
+    out.push(Event::Html("</ol>\n</section>\n".into()));
+    out
+}
+
+/// Renders a footnote reference as a link to its footnote, numbering it if it is the first
+/// reference to it. Other events are returned unchanged.
+fn footnote_reference<'a>(event: Event<'a>, labels: &mut Vec<CowStr<'a>>) -> Event<'a> {
+    let Event::FootnoteReference(label) = event else {
+        return event;
+    };
+    let (n, id) = if let Some(index) = labels.iter().position(|l| *l == label) {
+        (index + 1, String::new())
+    } else {
+        labels.push(label);
+        (labels.len(), format!(" id=\"fnref-{}\"", labels.len()))
+    };
+    Event::InlineHtml(
+        format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>").into(),
+    )
+}
+
 /// Moves figures (the only block-level HTML inside paragraphs) out of their paragraphs, splitting
 /// the paragraph around them, since `<p>` can't contain `<figure>`.
 fn hoist_figures(events: Vec<Event>) -> Vec<Event> {
@@ -979,10 +1057,54 @@ mod tests {
         assert_eq!(
             to_html("| a |\n| - |\n| b |\n\n~~s~~ x[^1]\n\n- [ ] t\n\n[^1]: n"),
             "<table><thead><tr><th>a</th></tr></thead><tbody>\n<tr><td>b</td></tr>\n</tbody></table>\n\
-             <p><del>s</del> x<sup class=\"footnote-reference\"><a href=\"#1\">1</a></sup></p>\n\
+             <p><del>s</del> x<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup></p>\n\
              <ul>\n<li><input disabled=\"\" type=\"checkbox\"/>\nt</li>\n</ul>\n\
-             <div class=\"footnote-definition\" id=\"1\"><sup class=\"footnote-definition-label\">1</sup>\n\
-             <p>n</p>\n</div>\n"
+             <section class=\"footnotes\">\n<hr />\n<ol>\n<li id=\"fn-1\">\n\
+             <p>n <a href=\"#fnref-1\" class=\"footnote-backref\" aria-label=\"Back to reference 1\">\u{21a9}\u{fe0e}</a></p>\n\
+             </li>\n</ol>\n</section>\n"
+        );
+    }
+
+    #[test]
+    fn footnotes() {
+        let backref = |n| {
+            format!(
+                "<a href=\"#fnref-{n}\" class=\"footnote-backref\" \
+                 aria-label=\"Back to reference {n}\">\u{21a9}\u{fe0e}</a>"
+            )
+        };
+        // Footnotes are numbered by first reference, wherever they are defined. Repeated
+        // references link to the same footnote, and undefined references stay as text.
+        assert_eq!(
+            to_html("[^b]: Bee.\n\nA[^a] B[^b] A[^a] X[^x]\n\n[^a]: Ay."),
+            format!(
+                "<p>A<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup> \
+                 B<sup class=\"footnote-ref\"><a href=\"#fn-2\" id=\"fnref-2\">2</a></sup> \
+                 A<sup class=\"footnote-ref\"><a href=\"#fn-1\">1</a></sup> X[^x]</p>\n\
+                 <section class=\"footnotes\">\n<hr />\n<ol>\n\
+                 <li id=\"fn-1\">\n<p>Ay. {}</p>\n</li>\n\
+                 <li id=\"fn-2\">\n<p>Bee. {}</p>\n</li>\n\
+                 </ol>\n</section>\n",
+                backref(1),
+                backref(2)
+            )
+        );
+        // Footnotes referenced from other footnotes come after them. Unused footnotes, and the
+        // references in them, are dropped. A footnote not ending in a paragraph gets its link
+        // back in a paragraph of its own.
+        assert_eq!(
+            to_html(
+                "A[^a]\n\n[^a]: See[^b].\n\n[^b]: Code:\n\n        x\n\n[^u]: Uses[^c].\n\n[^c]: C."
+            ),
+            format!(
+                "<p>A<sup class=\"footnote-ref\"><a href=\"#fn-1\" id=\"fnref-1\">1</a></sup></p>\n\
+                 <section class=\"footnotes\">\n<hr />\n<ol>\n\
+                 <li id=\"fn-1\">\n<p>See<sup class=\"footnote-ref\"><a href=\"#fn-2\" id=\"fnref-2\">2</a></sup>. {}</p>\n</li>\n\
+                 <li id=\"fn-2\">\n<p>Code:</p>\n<pre><code>x\n</code></pre>\n<p>{}</p>\n</li>\n\
+                 </ol>\n</section>\n",
+                backref(1),
+                backref(2)
+            )
         );
     }
 
