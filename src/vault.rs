@@ -6,6 +6,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
+
+/// What to escape in an SVG `data:` URL: what would end the URL or the attribute it's in, or
+/// change its meaning. Everything else, including spaces, can stay as-is.
+const SVG_ESCAPES: &AsciiSet = &CONTROLS.add(b'"').add(b'#').add(b'%').add(b'&');
+
 pub struct Vault {
     /// The canonicalized vault root.
     root: PathBuf,
@@ -33,6 +39,9 @@ impl Vault {
     }
 
     /// Finds an image linked from a note in `note_dir` and reads it into a `data:` URL.
+    ///
+    /// SVGs are percent-encoded rather than base64-encoded, which keeps them smaller and leaves
+    /// them compressible.
     pub fn image_data_url(&self, link: &str, note_dir: &Path) -> Result<String, String> {
         let path = self
             .resolve(link, note_dir)
@@ -40,7 +49,11 @@ impl Vault {
         let mime = image_mime_type(&path)
             .ok_or_else(|| format!("{} is not a supported image type", path.display()))?;
         let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        Ok(format!("data:{mime};base64,{}", base64(&bytes)))
+        Ok(if mime == "image/svg+xml" {
+            format!("data:{mime},{}", percent_encode(&bytes, SVG_ESCAPES))
+        } else {
+            format!("data:{mime};base64,{}", base64(&bytes))
+        })
     }
 
     /// Finds the file a link in a note in `note_dir` points to, the way Obsidian does: relative
@@ -248,6 +261,15 @@ pub mod tests {
         let (dir, vault) = vault();
         let data_url = |link| vault.image_data_url(link, Path::new(""));
         assert_eq!(data_url("a.png").unwrap(), "data:image/png;base64,YS5wbmc=");
+        std::fs::write(
+            dir.path().join("s.svg"),
+            "<svg a=\"#1\">\n<text>50% & é</text></svg>",
+        )
+        .unwrap();
+        assert_eq!(
+            data_url("s.svg").unwrap(),
+            "data:image/svg+xml,<svg a=%22%231%22>%0A<text>50%25 %26 %C3%A9</text></svg>"
+        );
         assert_eq!(
             data_url("nope.png").unwrap_err(),
             "image not found in vault: nope.png"

@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     const CAT: &str = "data:image/png;base64,Y2F0";
-    const DOG: &str = "data:image/svg+xml;base64,ZG9n";
+    const DOG: &str = "data:image/svg+xml,dog";
 
     #[test]
     fn images_without_alt_text() {

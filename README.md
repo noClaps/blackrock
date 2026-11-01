@@ -40,7 +40,8 @@ binaries need glibc, so they don't run on Alpine.
 
 - CommonMark plus tables, footnotes, strikethrough and task lists. Tables are wrapped in a `<div>`
 - PNG, JPEG, GIF, SVG, WebP and AVIF images (`![[cat.png]]`, `![alt](cat.png)`) are embedded as
-  `data:` URLs. Like Obsidian, they are looked up relative to the note, then the vault root, then
+  `data:` URLs, base64-encoded except for SVGs, which are percent-encoded to stay smaller. Like
+  Obsidian, they are looked up relative to the note, then the vault root, then
   anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian:
   `![[cat.png|300]]`, `![[cat.png|A cat|300x200]]`, `![A cat|300](cat.png)`
 - Images with alt text become `<figure>`s with the alt text as the `<figcaption>`. Links,
