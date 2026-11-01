@@ -624,11 +624,16 @@ fn strip_comments(markdown: &str) -> String {
             _ => None,
         })
         .collect();
+    // The ranges are in document order and don't overlap, so they can be binary searched.
+    let is_protected = |i: usize| {
+        let index = protected.partition_point(|range| range.end <= i);
+        protected.get(index).is_some_and(|range| range.contains(&i))
+    };
     let find_delimiter = |from: usize| {
         markdown[from..]
             .match_indices("%%")
             .map(|(i, _)| from + i)
-            .find(|i| !protected.iter().any(|range| range.contains(i)))
+            .find(|&i| !is_protected(i))
     };
 
     let mut out = String::new();
@@ -1504,6 +1509,13 @@ mod tests {
             "<p>a</p>\n<p>b</p>\n"
         );
         assert_eq!(to_html("`%%code%%`"), "<p><code>%%code%%</code></p>\n");
+        // `%%` in code or math neither opens nor closes a comment.
+        assert_eq!(to_html("a %%c `x %% y` d%% e"), "<p>a  e</p>\n");
+        assert_eq!(
+            to_html("`%%` $a %% b$ %%c%% d"),
+            // In LaTeX, `%` starts a comment.
+            "<p><code>%%</code> <math><mi>a</mi></math>  d</p>\n"
+        );
         assert_eq!(to_html("a %% rest\n\nmore"), "<p>a</p>\n");
         let html = to_html("$$\n50\\%% x\n$$\n");
         // `\%` is a percent sign and the following `%` starts a LaTeX comment.
