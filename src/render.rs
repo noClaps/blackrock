@@ -614,6 +614,9 @@ fn tag_html(tag: &str) -> String {
 /// Removes Obsidian comments (`%%…%%`), except in code and math. An unclosed comment extends to
 /// the end of the document.
 fn strip_comments(markdown: &str) -> String {
+    if !markdown.contains("%%") {
+        return markdown.to_owned();
+    }
     let protected: Vec<Range<usize>> = Parser::new_ext(markdown, options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
