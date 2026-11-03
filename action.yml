@@ -3,7 +3,7 @@ description: Install the blackrock CLI and add it to the PATH.
 
 inputs:
   version:
-    description: The release tag to install, like `v0.3.0`, or `latest`.
+    description: The release tag to install, like `v0.3.1`, or `latest`.
     default: latest
 
 runs:
