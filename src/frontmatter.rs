@@ -1,35 +1,25 @@
-//! YAML frontmatter extraction and conversion to JSON.
-
-use serde_json::{Map, Value as Json};
+use serde_json::{Value as Json, json};
 
 /// Splits a document into its raw YAML frontmatter (if any) and the remaining markdown body.
 ///
 /// Frontmatter must start on the very first line with `---` and end with a line containing only
 /// `---`.
 pub fn split(source: &str) -> (Option<&str>, &str) {
-    let text = source.strip_prefix('\u{feff}').unwrap_or(source);
-    let Some((first, rest)) = text.split_once('\n') else {
-        return (None, source);
-    };
-    if first.trim_end() != "---" {
-        return (None, source);
+    match source.strip_prefix("---\n") {
+        Some(rest) => match rest.split_once("---\n") {
+            Some((fm, body)) => (Some(fm), body),
+            None => (None, source),
+        },
+        None => (None, source),
     }
-    let mut offset = 0;
-    for line in rest.split_inclusive('\n') {
-        if line.trim_end() == "---" {
-            return (Some(&rest[..offset]), &rest[offset + line.len()..]);
-        }
-        offset += line.len();
-    }
-    (None, source)
 }
 
 /// Parses YAML frontmatter into a JSON value. Empty frontmatter becomes an empty object.
 pub fn to_json(yaml: Option<&str>) -> Result<Json, serde_yaml_ng::Error> {
-    Ok(match serde_yaml_ng::from_str(yaml.unwrap_or_default())? {
-        Json::Null => Json::Object(Map::new()),
-        json => json,
-    })
+    match serde_yaml_ng::from_str(yaml.unwrap_or_default()) {
+        Ok(Json::Null) => Ok(json!({})),
+        v => v,
+    }
 }
 
 #[cfg(test)]
