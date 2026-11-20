@@ -4,10 +4,10 @@ version = "0.3.1"
 edition = "2024"
 
 [dependencies]
-irosashi = "0.3"
-math-core = "0.9"
+irosashi = "0.3.1"
+math-core = "0.9.0"
 percent-encoding = "2.3.2"
-pulldown-cmark = "0.13"
-pulldown-cmark-escape = "0.11"
+pulldown-cmark = "0.13.6"
+pulldown-cmark-escape = "0.11.0"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
-serde_yaml_ng = "0.10"
+serde_yaml_ng = "0.10.0"
