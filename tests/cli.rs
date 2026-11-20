@@ -31,18 +31,6 @@ fn prints_metadata() {
 }
 
 #[test]
-fn requires_vault_root() {
-    let output = blackrock(".", &["examples/sample.md"]);
-    assert!(!output.status.success());
-    assert_eq!(output.stdout, b"");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("is not the root of an Obsidian vault"),
-        "{stderr}"
-    );
-}
-
-#[test]
 fn reports_missing_files() {
     let output = blackrock("examples", &["missing.md"]);
     assert!(!output.status.success());

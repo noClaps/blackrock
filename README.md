@@ -2,7 +2,7 @@
 
 Converts an Obsidian-flavored markdown file into an HTML fragment.
 
-Run it from the root of an Obsidian vault (the directory containing `.obsidian`):
+Run it from the root of your project:
 
 ```sh
 cd ~/my-vault

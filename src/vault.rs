@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
@@ -23,14 +23,8 @@ pub struct Vault {
 }
 
 impl Vault {
-    /// Opens the vault rooted at `root`, which must contain Obsidian's `.obsidian` directory.
+    /// Opens the vault rooted at `root`.
     pub fn open(root: &Path) -> Result<Self> {
-        ensure!(
-            root.join(".obsidian").is_dir(),
-            "{} is not the root of an Obsidian vault (it has no .obsidian directory); \
-         run blackrock from the vault root",
-            root.display()
-        );
         let root = root
             .canonicalize()
             .with_context(|| format!("cannot open vault {}", root.display()))?;
@@ -112,7 +106,7 @@ impl Vault {
 }
 
 /// Recursively collects the files in `dir`, skipping hidden files and directories like
-/// `.obsidian`, `.git` and `.trash`.
+/// `.git` and `.trash`.
 fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -182,7 +176,7 @@ pub mod tests {
             "notes/deep/b.png",
             "assets/deep/c.png",
             "links/placeholder.png",
-            ".obsidian/hidden.png",
+            ".trash/hidden.png",
         ] {
             let path = dir.path().join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -195,13 +189,6 @@ pub mod tests {
         .unwrap();
         let vault = Vault::open(dir.path()).unwrap();
         (dir, vault)
-    }
-
-    #[test]
-    fn requires_obsidian_directory() {
-        let dir = TempDir::new();
-        let err = Vault::open(dir.path()).unwrap_err().to_string();
-        assert!(err.contains("not the root of an Obsidian vault"), "{err}");
     }
 
     #[test]
