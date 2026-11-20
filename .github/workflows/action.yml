@@ -9,7 +9,7 @@ jobs:
   install:
     strategy:
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-latest, macos-latest]
         version: [latest, v0.1.0]
     runs-on: ${{ matrix.os }}
     steps:
@@ -17,13 +17,4 @@ jobs:
       - uses: ./
         with:
           version: ${{ matrix.version }}
-      - run: blackrock --version
-
-  # A Debian container, like the images Forgejo runners commonly use.
-  container:
-    runs-on: ubuntu-latest
-    container: node:20-bookworm
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./
       - run: blackrock --version

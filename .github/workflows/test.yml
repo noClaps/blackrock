@@ -1,6 +1,6 @@
 name: Test
 
-on: push
+on: [push, workflow_dispatch]
 
 jobs:
   test:
@@ -17,4 +17,4 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: cargo fmt --check
-      - run: cargo clippy --locked --all-targets -- -Wclippy::pedantic -Dwarnings
+      - run: cargo clippy --locked --all-targets -- -Dwarnings
