@@ -4,6 +4,7 @@ version = "0.3.1"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
 irosashi = "0.3.1"
 math-core = "0.9.0"
 percent-encoding = "2.3.2"

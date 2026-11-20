@@ -48,7 +48,7 @@ fn reports_missing_files() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.starts_with("blackrock: cannot read missing.md: "),
+        stderr.starts_with("Error: cannot read missing.md"),
         "{stderr}"
     );
 }
@@ -73,12 +73,9 @@ fn rejects_bad_arguments() {
     for (args, error) in [
         (
             &["--nope"][..],
-            "blackrock: unknown option --nope; see --help\n",
+            "Error: unknown option --nope; see --help\n",
         ),
-        (
-            &["a.md", "b.md"],
-            "blackrock: too many arguments; see --help\n",
-        ),
+        (&["a.md", "b.md"], "Error: too many arguments; see --help\n"),
     ] {
         let output = blackrock("examples", args);
         assert!(!output.status.success());

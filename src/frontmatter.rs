@@ -15,7 +15,7 @@ pub fn split(source: &str) -> (Option<&str>, &str) {
 }
 
 /// Parses YAML frontmatter into a JSON value. Empty frontmatter becomes an empty object.
-pub fn to_json(yaml: Option<&str>) -> Result<Json, serde_yaml_ng::Error> {
+pub fn to_json(yaml: Option<&str>) -> serde_yaml_ng::Result<Json> {
     match serde_yaml_ng::from_str(yaml.unwrap_or_default()) {
         Ok(Json::Null) => Ok(json!({})),
         v => v,
