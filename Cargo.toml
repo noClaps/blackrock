@@ -11,3 +11,6 @@ pulldown-cmark = "0.13.6"
 pulldown-cmark-escape = "0.11.0"
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
+
+[lints.clippy]
+pedantic = "warn"
