@@ -1,17 +1,20 @@
-//! Finding files in an Obsidian vault.
+use std::{
+    cell::OnceCell,
+    collections::HashMap,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
 
-use std::cell::OnceCell;
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-
+use anyhow::{Context, Result, anyhow, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 
 /// What to escape in an SVG `data:` URL: what would end the URL or the attribute it's in, or
 /// change its meaning. Everything else, including spaces, can stay as-is.
 const SVG_ESCAPES: &AsciiSet = &CONTROLS.add(b'"').add(b'#').add(b'%').add(b'&');
 
+#[derive(Debug)]
 pub struct Vault {
     /// The canonicalized vault root.
     root: PathBuf,
@@ -21,17 +24,16 @@ pub struct Vault {
 
 impl Vault {
     /// Opens the vault rooted at `root`, which must contain Obsidian's `.obsidian` directory.
-    pub fn open(root: &Path) -> Result<Self, String> {
-        if !root.join(".obsidian").is_dir() {
-            return Err(format!(
-                "{} is not the root of an Obsidian vault (it has no .obsidian directory); \
-                 run blackrock from the vault root",
-                root.display()
-            ));
-        }
+    pub fn open(root: &Path) -> Result<Self> {
+        ensure!(
+            root.join(".obsidian").is_dir(),
+            "{} is not the root of an Obsidian vault (it has no .obsidian directory); \
+         run blackrock from the vault root",
+            root.display()
+        );
         let root = root
             .canonicalize()
-            .map_err(|e| format!("cannot open vault {}: {e}", root.display()))?;
+            .with_context(|| format!("cannot open vault {}", root.display()))?;
         Ok(Self {
             root,
             files_by_name: OnceCell::new(),
@@ -42,17 +44,17 @@ impl Vault {
     ///
     /// SVGs are percent-encoded rather than base64-encoded, which keeps them smaller and leaves
     /// them compressible.
-    pub fn image_data_url(&self, link: &str, note_dir: &Path) -> Result<String, String> {
+    pub fn image_data_url(&self, link: &str, note_dir: &Path) -> Result<String> {
         let path = self
             .resolve(link, note_dir)
-            .ok_or_else(|| format!("image not found in vault: {link}"))?;
+            .ok_or_else(|| anyhow!("image not found in vault: {link}"))?;
         let mime = image_mime_type(&path)
-            .ok_or_else(|| format!("{} is not a supported image type", path.display()))?;
-        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            .ok_or_else(|| anyhow!("{} is not a supported image type", path.display()))?;
+        let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
         Ok(if mime == "image/svg+xml" {
             format!("data:{mime},{}", percent_encode(&bytes, SVG_ESCAPES))
         } else {
-            format!("data:{mime};base64,{}", base64(&bytes))
+            format!("data:{mime};base64,{}", STANDARD.encode(&bytes))
         })
     }
 
@@ -129,23 +131,6 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// Encodes bytes as standard, padded base64.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let n = (chunk.iter().enumerate()).fold(0, |n, (i, &b)| n | usize::from(b) << (16 - 8 * i));
-        for i in 0..4 {
-            out.push(if i <= chunk.len() {
-                char::from(ALPHABET[(n >> (18 - 6 * i)) & 63])
-            } else {
-                '='
-            });
-        }
-    }
-    out
-}
-
 /// The MIME type of an image file, based on its extension.
 pub fn image_mime_type(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -162,6 +147,8 @@ pub fn image_mime_type(path: &Path) -> Option<&'static str> {
 
 #[cfg(test)]
 pub mod tests {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
     use super::*;
 
     /// A temporary directory, removed when dropped.
@@ -213,7 +200,7 @@ pub mod tests {
     #[test]
     fn requires_obsidian_directory() {
         let dir = TempDir::new();
-        let err = Vault::open(dir.path()).err().unwrap();
+        let err = Vault::open(dir.path()).unwrap_err().to_string();
         assert!(err.contains("not the root of an Obsidian vault"), "{err}");
     }
 
@@ -245,15 +232,15 @@ pub mod tests {
 
     #[test]
     fn encodes_base64() {
-        let encoded =
-            ["", "f", "fo", "foo", "foob", "fooba", "foobar"].map(|s| base64(s.as_bytes()));
+        let encoded = ["", "f", "fo", "foo", "foob", "fooba", "foobar"]
+            .map(|s| STANDARD.encode(s.as_bytes()));
         assert_eq!(
             encoded,
             [
                 "", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"
             ]
         );
-        assert_eq!(base64(&[0xfb, 0xff]), "+/8=");
+        assert_eq!(STANDARD.encode(&[0xfb, 0xff]), "+/8=");
     }
 
     #[test]
@@ -271,11 +258,11 @@ pub mod tests {
             "data:image/svg+xml,<svg a=%22%231%22>%0A<text>50%25 %26 %C3%A9</text></svg>"
         );
         assert_eq!(
-            data_url("nope.png").unwrap_err(),
+            data_url("nope.png").unwrap_err().to_string(),
             "image not found in vault: nope.png"
         );
         std::fs::write(dir.path().join("x.txt"), "").unwrap();
-        let err = data_url("x.txt").unwrap_err();
+        let err = data_url("x.txt").unwrap_err().to_string();
         assert!(err.ends_with("is not a supported image type"), "{err}");
     }
 }

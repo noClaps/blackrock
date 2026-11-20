@@ -283,7 +283,7 @@ impl Renderer<'_> {
         } else {
             match self.vault.image_data_url(link, self.note_dir) {
                 Ok(data_url) => data_url,
-                Err(err) => return self.error(err),
+                Err(err) => return self.error(err.to_string()),
             }
         };
         let title = if title.is_empty() {

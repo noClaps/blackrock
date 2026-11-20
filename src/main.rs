@@ -45,9 +45,6 @@ fn main() -> Result<()> {
         }
     }
 
-    let cwd = std::env::current_dir().context("cannot get current directory")?;
-    let vault = Vault::open(&cwd).map_err(|e| anyhow!("{e}"))?;
-
     let source = match &input {
         Some(path) => {
             fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
@@ -60,6 +57,7 @@ fn main() -> Result<()> {
         let json = frontmatter::to_json(yaml).context("invalid frontmatter")?;
         println!("{json:#}\n");
     } else {
+        let vault = Vault::open(&std::env::current_dir().context("cannot get current directory")?)?;
         let note_dir = input
             .as_deref()
             .and_then(Path::parent)
