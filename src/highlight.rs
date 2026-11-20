@@ -1,12 +1,4 @@
-//! Syntax highlighting of code blocks with Irosashi, using Shiki's grammars and Xcode's default
-//! color themes.
-//!
-//! Each highlighted token is wrapped in a `<span>` with an inline `color: light-dark(…)` style, so
-//! the colors follow the page's `color-scheme`.
-
-use std::collections::BTreeMap;
-use std::fmt::Write;
-use std::sync::LazyLock;
+use std::{collections::BTreeMap, fmt::Write, sync::LazyLock};
 
 use irosashi::{
     CodeToTokensOptions, DiagnosticKind, FontStyle, Highlighter, ThemedToken, TokensResult,

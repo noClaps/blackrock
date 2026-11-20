@@ -1,9 +1,4 @@
-//! Markdown to HTML rendering, with Obsidian's extensions to markdown.
-
-use std::collections::HashMap;
-use std::fmt::Write;
-use std::ops::Range;
-use std::path::Path;
+use std::{collections::HashMap, fmt::Write, ops::Range, path::Path};
 
 use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
 use percent_encoding::percent_decode_str;
@@ -12,8 +7,10 @@ use pulldown_cmark::{
 };
 use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text};
 
-use crate::highlight;
-use crate::vault::{self, Vault};
+use crate::{
+    highlight,
+    vault::{self, Vault},
+};
 
 fn options() -> Options {
     Options::ENABLE_TABLES
