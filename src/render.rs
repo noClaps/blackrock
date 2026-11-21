@@ -482,9 +482,7 @@ impl Renderer<'_, '_> {
                         out.push_str(&self.math(math.value, display));
                     }
                     Node::Html(html) => out.push_str(html.value),
-                    Node::Image(image) if self.in_label => {
-                        self.inlines(&Self::label(image).0, out);
-                    }
+                    Node::Image(image) if self.in_label => self.inlines(&label(image).0, out),
                     Node::Image(image) => out.push_str(&self.image(image)),
                     Node::FootnoteReference(reference) => {
                         out.push_str(&self.footnote_reference(reference.identifier));
@@ -520,28 +518,10 @@ impl Renderer<'_, '_> {
         out.push_str(&text(&s[plain_start..]));
     }
 
-    /// An image's label and size attributes.
-    ///
-    /// The label is its alt text, which can end with a size, as in `alt|300` or `alt|300x200`.
-    fn label<'n, 'a>(image: &'n Image<'a>) -> (Vec<Piece<'n, 'a>>, String) {
-        let mut label =
-            (image.alt_content.as_ref()).map_or_else(Vec::new, |alt| pieces(&alt.children));
-        let mut size = String::new();
-        // The size follows the last `|`, which must be in the label's last text.
-        if let Some(Piece::Text(last)) = label.last_mut()
-            && let Some((alt, attrs)) = (last.rsplit_once('|'))
-                .and_then(|(alt, size)| Some((alt.to_owned(), size_attrs(size)?)))
-        {
-            size = attrs;
-            *last = alt;
-        }
-        (label, size)
-    }
-
     /// Renders an image with alt text outside links as a figure, with the label's markup (and
     /// rendered math) as its caption. Returns `None` for other images.
     fn figure(&mut self, image: &Image) -> Option<String> {
-        let (label, _) = Self::label(image);
+        let (label, _) = label(image);
         if self.link_depth > 0 || plain_text(&label).trim().is_empty() {
             return None;
         }
@@ -559,7 +539,7 @@ impl Renderer<'_, '_> {
     /// Renders an `<img>`, with the label's plain text (with math as LaTeX) as its alt text. Local
     /// images are embedded as `data:` URLs.
     fn image(&mut self, image: &Image) -> String {
-        let (label, size) = Self::label(image);
+        let (label, size) = label(image);
         let alt = plain_text(&label);
         let link = percent_decode_str(image.url).decode_utf8_lossy();
         let src = if is_remote(&link) {
@@ -639,6 +619,23 @@ impl Renderer<'_, '_> {
         };
         format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>")
     }
+}
+
+/// An image's label and size attributes.
+///
+/// The label is its alt text, which can end with a size, as in `alt|300` or `alt|300x200`.
+fn label<'n, 'a>(image: &'n Image<'a>) -> (Vec<Piece<'n, 'a>>, String) {
+    let mut label = (image.alt_content.as_ref()).map_or_else(Vec::new, |alt| pieces(&alt.children));
+    let mut size = String::new();
+    // The size follows the last `|`, which must be in the label's last text.
+    if let Some(Piece::Text(last)) = label.last_mut()
+        && let Some((alt, attrs)) = (last.rsplit_once('|'))
+            .and_then(|(alt, size)| Some((alt.to_owned(), size_attrs(size)?)))
+    {
+        size = attrs;
+        *last = alt;
+    }
+    (label, size)
 }
 
 /// The plain text of inline content, with math as LaTeX and images as their labels.
