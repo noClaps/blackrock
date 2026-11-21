@@ -62,7 +62,7 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
                 }
                 if !style.is_empty() {
                     // Writing to a `String` can't fail.
-                    let _ = write!(html, "<span style=\"{style}\">");
+                    _ = write!(html, "<span style=\"{style}\">");
                 }
                 open = style;
             }
@@ -89,7 +89,7 @@ fn token_style(result: &TokensResult, token: &ThemedToken) -> String {
 
     let mut style = String::new();
     if light_color != result.fg_of(0) || dark_color != result.fg_of(1) {
-        let _ = write!(style, "color:light-dark({light_color},{dark_color})");
+        _ = write!(style, "color:light-dark({light_color},{dark_color})");
     }
     for (flag, css) in [
         (FontStyle::BOLD, "font-weight:bold"),

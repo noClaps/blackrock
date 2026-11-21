@@ -191,9 +191,9 @@ impl Renderer<'_, '_> {
                 let id =
                     (self.ids).plan(&slugify_heading(&collect_heading_text(&heading.children)));
                 let level = heading.depth;
-                let _ = write!(out, "<h{level} id=\"{}\">", attr(&id));
+                _ = write!(out, "<h{level} id=\"{}\">", attr(&id));
                 self.inlines(&pieces, out);
-                let _ = writeln!(out, "</h{level}>");
+                _ = writeln!(out, "</h{level}>");
             }
             Node::ThematicBreak(_) => out.push_str("<hr />\n"),
             Node::BlockQuote(quote) => self.block_quote(quote, out),
@@ -216,7 +216,7 @@ impl Renderer<'_, '_> {
                         }
                     }
                 }
-                let _ = writeln!(out, "<div>{html}</div>");
+                _ = writeln!(out, "<div>{html}</div>");
             }
             Node::Html(html) => {
                 out.push_str(html.value);
@@ -241,7 +241,7 @@ impl Renderer<'_, '_> {
             let content = text.trim();
             if !content.is_empty() {
                 if wrap {
-                    let _ = writeln!(html, "<p>{content}</p>");
+                    _ = writeln!(html, "<p>{content}</p>");
                 } else {
                     html.push_str(content);
                 }
@@ -251,7 +251,7 @@ impl Renderer<'_, '_> {
         if wrap && self.is_display_math_only(pieces) {
             self.at_boundary = true;
             self.inlines(pieces, &mut text);
-            let _ = writeln!(html, "<div>{}</div>", text.trim());
+            _ = writeln!(html, "<div>{}</div>", text.trim());
             return html;
         }
         self.at_boundary = true;
@@ -362,7 +362,7 @@ impl Renderer<'_, '_> {
                 "</ol>\n"
             }
             (true, Some(start)) => {
-                let _ = writeln!(out, "<ol start=\"{start}\">");
+                _ = writeln!(out, "<ol start=\"{start}\">");
                 "</ol>\n"
             }
         };
@@ -370,7 +370,7 @@ impl Renderer<'_, '_> {
             let mut html = String::from("<li>");
             if let Some(checked) = item.checked {
                 let checked = if checked { " checked=\"\"" } else { "" };
-                let _ = writeln!(html, "<input disabled=\"\" type=\"checkbox\"{checked}/>");
+                _ = writeln!(html, "<input disabled=\"\" type=\"checkbox\"{checked}/>");
             } else if !tight {
                 html.push('\n');
             }
@@ -410,10 +410,10 @@ impl Renderer<'_, '_> {
                     Some(AlignKind::Right) => " style=\"text-align: right\"",
                     _ => "",
                 };
-                let _ = write!(out, "<{cell_tag}{style}>");
+                _ = write!(out, "<{cell_tag}{style}>");
                 self.at_boundary = true;
                 self.inlines(&pieces(&cell.children), out);
-                let _ = write!(out, "</{cell_tag}>");
+                _ = write!(out, "</{cell_tag}>");
             }
             out.push_str(if index == 0 {
                 "</tr></thead><tbody>\n"
@@ -435,9 +435,9 @@ impl Renderer<'_, '_> {
 
     fn inline(&mut self, node: &Node, out: &mut String) {
         let wrap = |this: &mut Self, tag: &str, children: &[Node], out: &mut String| {
-            let _ = write!(out, "<{tag}>");
+            _ = write!(out, "<{tag}>");
             this.inlines(&pieces(children), out);
-            let _ = write!(out, "</{tag}>");
+            _ = write!(out, "</{tag}>");
         };
         match node {
             Node::Text(text) => self.text(text.value, out),
@@ -459,9 +459,9 @@ impl Renderer<'_, '_> {
                     Some((page, id)) if is_block_id(id) => format!("{page}#{id}"),
                     _ => link.url.to_owned(),
                 };
-                let _ = write!(out, "<a href=\"{}\"", href(&url));
+                _ = write!(out, "<a href=\"{}\"", href(&url));
                 if let Some(title) = link.title.filter(|title| !title.is_empty()) {
-                    let _ = write!(out, " title=\"{}\"", attr(title));
+                    _ = write!(out, " title=\"{}\"", attr(title));
                 }
                 out.push('>');
                 self.link_depth += 1;
@@ -472,9 +472,7 @@ impl Renderer<'_, '_> {
             }
             node => {
                 match node {
-                    Node::InlineCode(code) => {
-                        let _ = write!(out, "<code>{}</code>", text(code.value));
-                    }
+                    Node::InlineCode(code) => _ = write!(out, "<code>{}</code>", text(code.value)),
                     Node::InlineMath(math) => {
                         let display = if self.is_display(math.span) {
                             MathDisplay::Block
@@ -609,7 +607,7 @@ impl Renderer<'_, '_> {
         let mut index = 0;
         while let Some(label) = self.footnote_labels.get(index).cloned() {
             index += 1;
-            let _ = writeln!(out, "<li id=\"fn-{index}\">");
+            _ = writeln!(out, "<li id=\"fn-{index}\">");
             let backref = format!(
                 "<a href=\"#fnref-{index}\" class=\"footnote-backref\" \
                  aria-label=\"Back to reference {index}\">\u{21a9}\u{fe0e}</a>"
@@ -621,7 +619,7 @@ impl Renderer<'_, '_> {
             if matches!(children.last(), Some(Node::Paragraph(_))) && body.ends_with("</p>\n") {
                 body.insert_str(body.len() - "</p>\n".len(), &format!(" {backref}"));
             } else {
-                let _ = writeln!(body, "<p>{backref}</p>");
+                _ = writeln!(body, "<p>{backref}</p>");
             }
             out.push_str(&body);
             out.push_str("</li>\n");
