@@ -30,10 +30,7 @@ const NOT_URL_SAFE: &AsciiSet = &CONTROLS
 /// Escapes a URL for an `href` or `src` attribute value. Bytes that aren't safe in a URL are
 /// percent-encoded, and `&` and `'` are escaped as HTML.
 pub fn href(s: &str) -> String {
-    utf8_percent_encode(s, NOT_URL_SAFE)
-        .to_string()
-        .replace('&', "&amp;")
-        .replace('\'', "&#x27;")
+    attr(&utf8_percent_encode(s, NOT_URL_SAFE).to_string())
 }
 
 #[cfg(test)]
@@ -60,7 +57,7 @@ mod tests {
     fn escapes_urls() {
         assert_eq!(
             href("https://example.com/a b?x=1&y='2'#^é[|]"),
-            "https://example.com/a%20b?x=1&amp;y=&#x27;2&#x27;#^%C3%A9%5B%7C%5D"
+            "https://example.com/a%20b?x=1&amp;y=&#39;2&#39;#^%C3%A9%5B%7C%5D"
         );
         assert_eq!(href("\"<>\\`{}\u{7f}\n"), "%22%3C%3E%5C%60%7B%7D%7F%0A");
         assert_eq!(href("!$%()*+,-./:;=?@_~"), "!$%()*+,-./:;=?@_~");
