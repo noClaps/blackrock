@@ -10,11 +10,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        version: [latest, v0.1.0]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./
         with:
-          version: ${{ matrix.version }}
+          version: latest
       - run: blackrock --version

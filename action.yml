@@ -16,17 +16,12 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -eu
-        case "$(uname -s)" in
-          Linux) os=unknown-linux-gnu ;;
-          Darwin) os=apple-darwin ;;
-          *) echo "blackrock: unsupported OS $(uname -s)" >&2; exit 1 ;;
+        case "$(uname -sm)" in
+          "Linux x86_64") file=blackrock-x86_64-unknown-linux-musl.tar.gz ;;
+          "Linux aarch64") file=blackrock-aarch64-unknown-linux-musl.tar.gz ;;
+          "Darwin arm64") file=blackrock-aarch64-apple-darwin.tar.gz ;;
+          *) echo "blackrock: unsupported OS and architecture $(uname -sm)" >&2; exit 1 ;;
         esac
-        case "$(uname -m)" in
-          x86_64 | amd64) arch=x86_64 ;;
-          aarch64 | arm64) arch=aarch64 ;;
-          *) echo "blackrock: unsupported architecture $(uname -m)" >&2; exit 1 ;;
-        esac
-        file="blackrock-$arch-$os.tar.gz"
         if [ "$VERSION" = latest ]; then
           url="https://github.com/noClaps/blackrock/releases/latest/download/$file"
         else
