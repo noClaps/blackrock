@@ -4,32 +4,15 @@ use std::fmt::Write;
 
 /// Escapes text for HTML element content.
 pub fn text(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            c => out.push(c),
-        }
-    }
-    out
+    // `&` goes first, so the `&`s of the other escapes aren't escaped again.
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Escapes text for a quoted HTML attribute value.
 pub fn attr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
+    text(s).replace('"', "&quot;").replace('\'', "&#39;")
 }
 
 /// Escapes a URL for an `href` or `src` attribute value. Bytes that aren't safe in a URL are
