@@ -4,11 +4,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use ferromark::{Allocator, ast::FrontMatterKind};
+use serde_json::{Value as Json, json};
 
 use crate::vault::Vault;
 
 mod escape;
-mod frontmatter;
 mod highlight;
 mod render;
 mod vault;
@@ -53,9 +54,18 @@ fn main() -> Result<()> {
         None => io::read_to_string(io::stdin()).context("cannot read stdin")?,
     };
 
-    let (yaml, body) = frontmatter::split(&source);
+    let arena = Allocator::for_source_len(source.len());
+    let document = render::parse(&arena, &source).context("cannot parse markdown")?;
     if metadata {
-        let json = frontmatter::to_json(yaml).context("invalid frontmatter")?;
+        // TOML frontmatter isn't supported.
+        let yaml = (document.front_matter.as_deref())
+            .filter(|frontmatter| frontmatter.kind == FrontMatterKind::Yaml)
+            .map_or("", |frontmatter| frontmatter.value);
+        let json = match serde_yaml_ng::from_str(yaml).context("invalid frontmatter")? {
+            // Empty frontmatter is an empty object.
+            Json::Null => json!({}),
+            json => json,
+        };
         println!("{json:#}\n");
     } else {
         let vault = Vault::open(&std::env::current_dir().context("cannot get current directory")?)?;
@@ -65,7 +75,8 @@ fn main() -> Result<()> {
             .unwrap_or(Path::new(""));
         println!(
             "{}",
-            render::to_html(body, &vault, note_dir).map_err(|es| anyhow!("{}", es.join("\n")))?
+            render::to_html(&document, &source, &vault, note_dir)
+                .map_err(|es| anyhow!("{}", es.join("\n")))?
         );
     }
     Ok(())

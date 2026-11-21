@@ -1,8 +1,8 @@
-use std::{collections::HashMap, fmt::Write, ops::Range, path::Path};
+use std::{collections::HashMap, fmt::Write, path::Path};
 
 use ferromark::{
-    Allocator, HeadingIdPlanner, Parser, ParserOptions,
-    ast::{AlignKind, BlockQuote, FootnoteDefinition, Image, List, Node, Table},
+    Allocator, HeadingIdPlanner, ParseResult, Parser, ParserOptions,
+    ast::{AlignKind, BlockQuote, Document, FootnoteDefinition, Image, List, Node, Table},
     collect_heading_text, slugify_heading,
 };
 use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
@@ -20,21 +20,27 @@ fn options() -> ParserOptions {
         highlight: true,
         image_alt_content: true,
         autolinks: false,
+        // Frontmatter isn't rendered.
+        front_matter: true,
         ..ParserOptions::gfm()
     }
 }
 
-/// Renders an Obsidian-flavored markdown body (without frontmatter) to an HTML fragment.
+/// Parses an Obsidian-flavored markdown note, including its frontmatter.
+pub fn parse<'a>(arena: &'a Allocator, source: &'a str) -> ParseResult<Document<'a>> {
+    Parser::with_options(arena, source, options()).parse()
+}
+
+/// Renders a note parsed from `source` to an HTML fragment, leaving out its frontmatter.
 ///
 /// Local images are looked up in `vault`, starting from the note's directory `note_dir`
 /// (relative to the vault root). Returns all errors if any image or math can't be rendered.
-pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
-    let markdown = strip_comments(markdown);
-    let arena = Allocator::for_source_len(markdown.len());
-    let document = Parser::with_options(&arena, &markdown, options())
-        .parse()
-        .map_err(|err| vec![format!("cannot parse markdown: {err}")])?;
-
+pub fn to_html(
+    document: &Document,
+    source: &str,
+    vault: &Vault,
+    note_dir: &Path,
+) -> Result<String, Vec<String>> {
     let mut definitions = HashMap::new();
     visit(&document.children, &mut |node| {
         if let Node::FootnoteDefinition(definition) = node {
@@ -50,7 +56,7 @@ pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String,
         ..Default::default()
     };
     let mut renderer = Renderer {
-        source: &markdown,
+        source,
         math: LatexToMathML::new(config, Vec::new()).expect("no custom macros"),
         ids: HeadingIdPlanner::new(),
         footnotes: FootnoteNumbers::default(),
@@ -764,49 +770,6 @@ fn tag_html(tag: &str) -> String {
     )
 }
 
-/// Removes Obsidian comments (`%%…%%`), except in code and math. An unclosed comment extends to
-/// the end of the document.
-fn strip_comments(markdown: &str) -> String {
-    if !markdown.contains("%%") {
-        return markdown.to_owned();
-    }
-    let arena = Allocator::for_source_len(markdown.len());
-    let mut protected: Vec<Range<usize>> = Vec::new();
-    if let Ok(document) = Parser::with_options(&arena, markdown, options()).parse() {
-        visit(&document.children, &mut |node| {
-            if let Node::CodeBlock(_)
-            | Node::InlineCode(_)
-            | Node::InlineMath(_)
-            | Node::MathBlock(_) = node
-            {
-                let span = node.span();
-                protected.push(span.start as usize..span.end as usize);
-            }
-        });
-    }
-    // Visiting is in document order and these nodes don't nest, so the ranges can be binary
-    // searched.
-    let is_protected = |i: usize| {
-        let index = protected.partition_point(|range| range.end <= i);
-        protected.get(index).is_some_and(|range| range.contains(&i))
-    };
-    let find_delimiter = |from: usize| {
-        markdown[from..]
-            .match_indices("%%")
-            .map(|(i, _)| from + i)
-            .find(|&i| !is_protected(i))
-    };
-
-    let mut out = String::new();
-    let mut copied = 0;
-    while let Some(open) = find_delimiter(copied) {
-        out.push_str(&markdown[copied..open]);
-        copied = find_delimiter(open + 2).map_or(markdown.len(), |close| close + 2);
-    }
-    out.push_str(&markdown[copied..]);
-    out
-}
-
 /// An Obsidian callout: a blockquote starting with `[!type]`.
 struct Callout {
     kind: String,
@@ -910,11 +873,17 @@ mod tests {
     use super::*;
     use crate::vault::tests::TempDir;
 
+    fn render(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
+        let arena = Allocator::for_source_len(markdown.len());
+        let document = parse(&arena, markdown).unwrap();
+        super::to_html(&document, markdown, vault, note_dir)
+    }
+
     /// Renders markdown that doesn't reference any vault files.
     fn to_html(markdown: &str) -> String {
         let dir = TempDir::new();
         let vault = Vault::open(dir.path()).unwrap();
-        super::to_html(markdown, &vault, Path::new("")).unwrap()
+        render(markdown, &vault, Path::new("")).unwrap()
     }
 
     #[test]
@@ -984,7 +953,7 @@ mod tests {
             "<pre><code>$$\n- x\n$$\n</code></pre>\n"
         );
         assert_eq!(to_html("a\n\n$$\n"), "<p>a</p>\n<p>$$</p>\n");
-        // `%%` in a block doesn't start a comment, and single `$`s keep their rules.
+        // `%` starts a LaTeX comment, and single `$`s keep their rules.
         let html = to_html("$$\n- 50\\%% x\n$$\n\n$5 and $10");
         assert!(html.contains("<mn>50</mn><mi>%</mi>"), "{html}");
         assert!(html.ends_with("<p>$5 and $10</p>\n"), "{html}");
@@ -1059,7 +1028,7 @@ mod tests {
 
     fn render_in_vault(markdown: &str) -> Result<String, Vec<String>> {
         let (_dir, vault) = vault();
-        super::to_html(markdown, &vault, Path::new("notes"))
+        render(markdown, &vault, Path::new("notes"))
     }
 
     const CAT: &str = "data:image/png;base64,Y2F0";
@@ -1258,6 +1227,13 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_is_not_rendered() {
+        assert_eq!(to_html("---\ntitle: Hi\n---\n# A"), "<h1 id=\"a\">A</h1>\n");
+        // Without frontmatter, `---` lines are breaks or headings.
+        assert_eq!(to_html("a\n---\n"), "<h2 id=\"a\">a</h2>\n");
+    }
+
+    #[test]
     fn callouts() {
         assert_eq!(
             to_html("> [!NOTE]\n> Body"),
@@ -1425,27 +1401,5 @@ mod tests {
         assert_eq!(to_html("# A\n\n^b"), "<h1 id=\"a\">A</h1>\n");
         // Without a block before it, it stays text.
         assert_eq!(to_html("^a\n\n^b"), "<p id=\"b\">^a</p>\n");
-    }
-
-    #[test]
-    fn comments() {
-        assert_eq!(to_html("a %%hidden%% b"), "<p>a  b</p>\n");
-        assert_eq!(to_html("%%x%% a"), "<p>a</p>\n");
-        assert_eq!(
-            to_html("a\n\n%%\nblock\n\n# x\n%%\n\nb"),
-            "<p>a</p>\n<p>b</p>\n"
-        );
-        assert_eq!(to_html("`%%code%%`"), "<p><code>%%code%%</code></p>\n");
-        // `%%` in code or math neither opens nor closes a comment.
-        assert_eq!(to_html("a %%c `x %% y` d%% e"), "<p>a  e</p>\n");
-        assert_eq!(
-            to_html("`%%` $a %% b$ %%c%% d"),
-            // In LaTeX, `%` starts a comment.
-            "<p><code>%%</code> <math><mi>a</mi></math>  d</p>\n"
-        );
-        assert_eq!(to_html("a %% rest\n\nmore"), "<p>a</p>\n");
-        let html = to_html("$$\n50\\%% x\n$$\n");
-        // `\%` is a percent sign and the following `%` starts a LaTeX comment.
-        assert!(html.contains("<mn>50</mn><mi>%</mi>"), "{html}");
     }
 }

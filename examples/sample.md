@@ -12,7 +12,7 @@ rating: 4.5
 
 Links to [Other Note](Other%20Note), [a section](Other%20Note#some-section) and [#Code](#code). Tagged #example and #nested/tag.
 
-This is ==highlighted== text with a %%hidden%% comment and **bold** text. ^intro
+This is ==highlighted== text and **bold** text. ^intro
 
 > [!warning]- Watch out
 > Callouts can be *folded*.
