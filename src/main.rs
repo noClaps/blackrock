@@ -18,12 +18,12 @@ Convert an Obsidian-flavored markdown file into an HTML fragment.
 Usage: blackrock [--metadata] [input]
 
 Arguments:
-  [input]  The markdown file to read. Reads from stdin if omitted.
+  [input]        The markdown file to read. Reads from stdin if omitted.
 
 Options:
-      --metadata  Output the YAML frontmatter as JSON instead of rendering HTML.
-  -h, --help      Print help.
-  -V, --version   Print version.";
+  --metadata     Output the YAML frontmatter as JSON instead of rendering HTML.
+  -h, --help     Print help.
+  -V, --version  Print version.";
 
 fn main() -> Result<()> {
     let mut input: Option<PathBuf> = None;
