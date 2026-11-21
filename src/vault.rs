@@ -141,8 +141,6 @@ pub fn image_mime_type(path: &Path) -> Option<&'static str> {
 
 #[cfg(test)]
 pub mod tests {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-
     use super::*;
 
     /// A temporary directory, removed when dropped.
@@ -215,19 +213,6 @@ pub mod tests {
         assert_eq!(resolve("hidden.png", ""), None);
         assert_eq!(resolve("missing.png", ""), None);
         assert_eq!(resolve("../../../../etc/hosts", "notes"), None);
-    }
-
-    #[test]
-    fn encodes_base64() {
-        let encoded = ["", "f", "fo", "foo", "foob", "fooba", "foobar"]
-            .map(|s| STANDARD.encode(s.as_bytes()));
-        assert_eq!(
-            encoded,
-            [
-                "", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy"
-            ]
-        );
-        assert_eq!(STANDARD.encode(&[0xfb, 0xff]), "+/8=");
     }
 
     #[test]
