@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 /// Escapes text for HTML element content.
 pub fn text(s: &str) -> String {
@@ -13,30 +13,27 @@ pub fn attr(s: &str) -> String {
     text(s).replace('"', "&quot;").replace('\'', "&#39;")
 }
 
+/// Bytes that aren't safe in a URL. Non-ASCII bytes are always encoded.
+const NOT_URL_SAFE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'<')
+    .add(b'>')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
 /// Escapes a URL for an `href` or `src` attribute value. Bytes that aren't safe in a URL are
-/// percent-encoded, except `&` and `'`, which are escaped as HTML.
+/// percent-encoded, and `&` and `'` are escaped as HTML.
 pub fn href(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &byte in s.as_bytes() {
-        match byte {
-            b'&' => out.push_str("&amp;"),
-            b'\'' => out.push_str("&#x27;"),
-            b'!'
-            | b'#'..=b'%'
-            | b'('..=b';'
-            | b'='
-            | b'?'..=b'Z'
-            | b'^'
-            | b'_'
-            | b'a'..=b'z'
-            | b'~' => out.push(char::from(byte)),
-            // Writing to a `String` can't fail.
-            _ => {
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
+    utf8_percent_encode(s, NOT_URL_SAFE)
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('\'', "&#x27;")
 }
 
 #[cfg(test)]
