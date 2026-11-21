@@ -237,6 +237,12 @@ impl Renderer<'_, '_> {
     fn paragraph(&mut self, pieces: &[Piece], wrap: bool) -> String {
         let mut html = String::new();
         let mut text = String::new();
+        self.at_boundary = true;
+        if wrap && self.is_display_math_only(pieces) {
+            self.inlines(pieces, &mut text);
+            _ = writeln!(html, "<div>{}</div>", text.trim());
+            return html;
+        }
         let flush = |html: &mut String, text: &mut String| {
             let content = text.trim();
             if !content.is_empty() {
@@ -248,20 +254,12 @@ impl Renderer<'_, '_> {
             }
             text.clear();
         };
-        if wrap && self.is_display_math_only(pieces) {
-            self.at_boundary = true;
-            self.inlines(pieces, &mut text);
-            _ = writeln!(html, "<div>{}</div>", text.trim());
-            return html;
-        }
-        self.at_boundary = true;
         for piece in pieces {
             if let Piece::Node(Node::Image(image)) = piece
                 && let Some(figure) = self.figure(image)
             {
                 flush(&mut html, &mut text);
                 html.push_str(&figure);
-                self.at_boundary = true;
             } else {
                 self.inlines(std::slice::from_ref(piece), &mut text);
             }
