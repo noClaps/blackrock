@@ -1,5 +1,3 @@
-//! HTML escaping, matching `pulldown-cmark`'s HTML output.
-
 use std::fmt::Write;
 
 /// Escapes text for HTML element content.
