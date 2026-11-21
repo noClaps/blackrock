@@ -34,7 +34,7 @@ The `version` input picks which release binary to install; the tag after `@` onl
 - Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (embeds of other files become links), callouts (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
 - Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
 - Footnotes (`[^1]`) are numbered in the order they're first referenced and collected at the end in a `<section class="footnotes">`, after an `<hr />`, each with a link back to its first reference
-- Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core](https://www.w3.org/TR/mathml-core/) with [math-core](https://github.com/tmke8/math-core). A `$$…$$` block on its own line is wrapped in a `<div>`
+- Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core](https://www.w3.org/TR/mathml-core/) with [math-core](https://github.com/tmke8/math-core). A `$$` line starts a block that ends at the next `$$` line, and the lines in between are never parsed as markdown, so a LaTeX line starting with `- ` can't become a list. Blocks, and `$$…$$` on its own line, are wrapped in a `<div>`
 - Code blocks highlighted with [Irosashi](https://github.com/frostybee/irosashi) using [Shiki](https://shiki.style/languages)'s grammars and Xcode's default light and dark themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements get no styles. Every language Shiki bundles is supported, by its Shiki id or alias
 
 `light-dark()` picks a color based on the element's used color scheme, so the page needs to declare which schemes it supports, e.g. `:root { color-scheme: light dark; }`.

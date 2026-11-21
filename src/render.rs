@@ -21,14 +21,100 @@ fn options() -> Options {
         | Options::ENABLE_WIKILINKS
 }
 
+/// The info string of the code fences that [`fence_display_math`] puts around `$$` blocks.
+const MATH_FENCE: &str = "blackrock-display-math";
+
+/// Parses markdown into events, turning [`fence_display_math`]'s fences into paragraphs of display
+/// math, which are rendered in a `<div>` like `$$…$$` on its own line.
+fn parse(markdown: &str) -> Vec<Event<'_>> {
+    let mut events = Vec::new();
+    let mut parser = TextMergeStream::new(Parser::new_ext(markdown, options()));
+    while let Some(event) = parser.next() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if &*info == MATH_FENCE => {
+                let mut latex = String::new();
+                // Code blocks only contain text, so this stops after the block's end.
+                while let Some(Event::Text(text)) = parser.next() {
+                    latex.push_str(&text);
+                }
+                events.push(Event::Start(Tag::Paragraph));
+                events.push(Event::DisplayMath(latex.into()));
+                events.push(Event::End(TagEnd::Paragraph));
+            }
+            event => events.push(event),
+        }
+    }
+    events
+}
+
+/// Turns each `$$` block, from a line that is just `$$` to the next one, into a code fence, so
+/// that the lines in it can't start lists or other blocks, as in Obsidian. `pulldown-cmark` parses
+/// `$$…$$` as inline math, after the block structure. `$$` lines in code, and a last `$$` line
+/// without a closing one, are left alone.
+fn fence_display_math(markdown: &str) -> String {
+    if !markdown.contains("$$") {
+        return markdown.to_owned();
+    }
+    let code = ranges(markdown, |event| {
+        matches!(event, Event::Start(Tag::CodeBlock(_)) | Event::Code(_))
+    });
+    // Each `$$` line's start, the length of its container prefix (`>`s and indentation) and end.
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for line in markdown.split_inclusive('\n') {
+        let prefix = line.len() - line.trim_start_matches([' ', '\t', '>']).len();
+        if line[prefix..].trim_end() == "$$" && !contains(&code, start + prefix) {
+            lines.push((start, prefix, start + line.len()));
+        }
+        start += line.len();
+    }
+
+    let mut out = String::new();
+    let mut copied = 0;
+    for &[
+        (open, open_prefix, body_start),
+        (close, close_prefix, close_end),
+    ] in lines.as_chunks::<2>().0
+    {
+        let body = &markdown[body_start..close];
+        // The fence must be longer than any run of backticks in the block.
+        let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+        let fence = "`".repeat(longest.max(2) + 1);
+        out.push_str(&markdown[copied..open + open_prefix]);
+        // Writing to a `String` can't fail.
+        let _ = writeln!(out, "{fence}{MATH_FENCE}");
+        out.push_str(body);
+        out.push_str(&markdown[close..close + close_prefix]);
+        out.push_str(&fence);
+        out.push('\n');
+        copied = close_end;
+    }
+    out.push_str(&markdown[copied..]);
+    out
+}
+
+/// The source ranges of the events that `keep` returns true for, in document order.
+fn ranges(markdown: &str, keep: impl Fn(&Event) -> bool) -> Vec<Range<usize>> {
+    Parser::new_ext(markdown, options())
+        .into_offset_iter()
+        .filter(|(event, _)| keep(event))
+        .map(|(_, range)| range)
+        .collect()
+}
+
+/// Whether `i` is in one of `ranges`, which must be in order and not overlap.
+fn contains(ranges: &[Range<usize>], i: usize) -> bool {
+    let index = ranges.partition_point(|range| range.end <= i);
+    ranges.get(index).is_some_and(|range| range.contains(&i))
+}
+
 /// Renders an Obsidian-flavored markdown body (without frontmatter) to an HTML fragment.
 ///
 /// Local images are looked up in `vault`, starting from the note's directory `note_dir`
 /// (relative to the vault root). Returns all errors if any image or math can't be rendered.
 pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
-    let markdown = strip_comments(markdown);
-    let events = TextMergeStream::new(Parser::new_ext(&markdown, options())).collect();
-    let events = standalone_block_ids(events);
+    let markdown = strip_comments(&fence_display_math(markdown));
+    let events = standalone_block_ids(parse(&markdown));
     let config = MathCoreConfig {
         // Like MathJax in Obsidian, `\newcommand`s stay defined for the rest of the note.
         global_group: true,
@@ -623,26 +709,20 @@ fn strip_comments(markdown: &str) -> String {
     if !markdown.contains("%%") {
         return markdown.to_owned();
     }
-    let protected: Vec<Range<usize>> = Parser::new_ext(markdown, options())
-        .into_offset_iter()
-        .filter_map(|(event, range)| match event {
+    let protected = ranges(markdown, |event| {
+        matches!(
+            event,
             Event::Start(Tag::CodeBlock(_))
-            | Event::Code(_)
-            | Event::InlineMath(_)
-            | Event::DisplayMath(_) => Some(range),
-            _ => None,
-        })
-        .collect();
-    // The ranges are in document order and don't overlap, so they can be binary searched.
-    let is_protected = |i: usize| {
-        let index = protected.partition_point(|range| range.end <= i);
-        protected.get(index).is_some_and(|range| range.contains(&i))
-    };
+                | Event::Code(_)
+                | Event::InlineMath(_)
+                | Event::DisplayMath(_)
+        )
+    });
     let find_delimiter = |from: usize| {
         markdown[from..]
             .match_indices("%%")
             .map(|(i, _)| from + i)
-            .find(|&i| !is_protected(i))
+            .find(|&i| !contains(&protected, i))
     };
 
     let mut out = String::new();
@@ -1061,6 +1141,42 @@ mod tests {
         // With other text, it stays in the paragraph.
         let html = to_html("a $$x$$");
         assert!(html.starts_with("<p>a <math display=\"block\">"), "{html}");
+    }
+
+    #[test]
+    fn display_math_blocks_contain_any_lines() {
+        let minus = "<math display=\"block\"><mo lspace=\"0\" rspace=\"0\">−</mo><mi>x</mi></math>";
+        // Lines that would start a list, heading or quote stay part of the math.
+        assert_eq!(to_html("$$\n- x\n$$\n"), format!("<div>{minus}</div>\n"));
+        let html = to_html("$$\n\\begin{matrix}\n- & a \\\\\n+ & b\n\\end{matrix}\n$$\n");
+        assert!(
+            html.starts_with("<div><math display=\"block\"><mtable"),
+            "{html}"
+        );
+        assert!(!html.contains("<li>"), "{html}");
+        // Also in callouts and list items.
+        assert_eq!(
+            to_html("> [!note]\n> $$\n> - x\n> $$\n"),
+            format!(
+                "<div class=\"callout\" data-callout=\"note\">\n\
+                 <div class=\"callout-title\">Note</div>\n\
+                 <div class=\"callout-content\">\n<div>{minus}</div>\n</div>\n</div>\n"
+            )
+        );
+        assert_eq!(
+            to_html("- a\n\n  $$\n  - x\n  $$\n"),
+            format!("<ul>\n<li>\n<p>a</p>\n<div>{minus}</div>\n</li>\n</ul>\n")
+        );
+        // `$$` lines in code are left alone, as is a `$$` line without a closing one.
+        assert_eq!(
+            to_html("```\n$$\n- x\n$$\n```\n"),
+            "<pre><code>$$\n- x\n$$\n</code></pre>\n"
+        );
+        assert_eq!(to_html("a\n\n$$\n"), "<p>a</p>\n<p>$$</p>\n");
+        // `%%` in a block doesn't start a comment, and single `$`s keep their rules.
+        let html = to_html("$$\n- 50\\%% x\n$$\n\n$5 and $10");
+        assert!(html.contains("<mn>50</mn><mi>%</mi>"), "{html}");
+        assert!(html.ends_with("<p>$5 and $10</p>\n"), "{html}");
     }
 
     #[test]
