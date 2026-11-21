@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         };
         println!("{json:#}\n");
     } else {
-        let vault = Vault::open(&std::env::current_dir().context("cannot get current directory")?)?;
+        let vault = Vault::open(Path::new("."))?;
         let note_dir = input
             .as_deref()
             .and_then(Path::parent)
