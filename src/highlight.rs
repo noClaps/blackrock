@@ -25,18 +25,21 @@ static HIGHLIGHTER: LazyLock<Highlighter> = LazyLock::new(|| {
         .expect("the Xcode themes are valid")
 });
 
+// Themes are ordered by key, so the light theme is slot 0 and the dark theme slot 1.
+const THEMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
+    BTreeMap::from([
+        ("0".to_owned(), "xcode-light".to_owned()),
+        ("1".to_owned(), "xcode-dark".to_owned()),
+    ])
+});
+
 /// Highlights `code` as `lang`, a Shiki language id or alias, returning HTML for the contents of
 /// a `<code>` element.
 ///
 /// Returns `None` if the language is not supported.
 pub fn highlight(lang: &str, code: &str) -> Option<String> {
-    // Themes are ordered by key, so the light theme is slot 0 and the dark theme slot 1.
-    let themes = BTreeMap::from([
-        ("0".to_owned(), "xcode-light".to_owned()),
-        ("1".to_owned(), "xcode-dark".to_owned()),
-    ]);
     let result = HIGHLIGHTER
-        .code_to_tokens_multi(code, &themes, &CodeToTokensOptions::new(lang, ""))
+        .code_to_tokens_multi(code, &THEMES, &CodeToTokensOptions::new(lang, ""))
         .ok()?;
     if (result.diagnostics.iter()).any(|d| matches!(d.kind, DiagnosticKind::UnknownLanguage)) {
         return None;
