@@ -42,14 +42,7 @@ pub fn to_html(
     note_dir: &Path,
 ) -> Result<String, Vec<String>> {
     let mut definitions = HashMap::new();
-    visit(&document.children, &mut |node| {
-        if let Node::FootnoteDefinition(definition) = node {
-            // Like links, the first definition of a label wins.
-            definitions
-                .entry(definition.identifier)
-                .or_insert(&**definition);
-        }
-    });
+    footnote_definitions(&document.children, &mut definitions);
     let config = MathCoreConfig {
         // Like MathJax in Obsidian, `\newcommand`s stay defined for the rest of the note.
         global_group: true,
@@ -59,7 +52,7 @@ pub fn to_html(
         source,
         math: LatexToMathML::new(config, Vec::new()).expect("no custom macros"),
         ids: HeadingIdPlanner::new(),
-        footnotes: FootnoteNumbers::default(),
+        footnote_labels: Vec::new(),
         vault,
         note_dir,
         errors: Vec::new(),
@@ -109,30 +102,28 @@ fn inline_children<'n, 'a>(node: &'n Node<'a>) -> Option<&'n [Node<'a>]> {
     })
 }
 
-/// Calls `f` on each node and all of its descendants, in document order.
-fn visit<'n, 'a>(nodes: &'n [Node<'a>], f: &mut impl FnMut(&'n Node<'a>)) {
+/// Collects the footnote definitions in `nodes` and the blocks in them by label.
+fn footnote_definitions<'n, 'a>(
+    nodes: &'n [Node<'a>],
+    definitions: &mut HashMap<&'a str, &'n FootnoteDefinition<'a>>,
+) {
     for node in nodes {
-        f(node);
         match node {
-            Node::Paragraph(n) => visit(&n.children, f),
-            Node::Heading(n) => visit(&n.children, f),
-            Node::BlockQuote(n) => visit(&n.children, f),
-            Node::FootnoteDefinition(n) => visit(&n.children, f),
-            Node::List(n) => {
-                for item in &n.children {
-                    visit(&item.children, f);
+            Node::FootnoteDefinition(definition) => {
+                // Like links, the first definition of a label wins.
+                definitions
+                    .entry(definition.identifier)
+                    .or_insert(definition);
+                footnote_definitions(&definition.children, definitions);
+            }
+            Node::BlockQuote(quote) => footnote_definitions(&quote.children, definitions),
+            Node::List(list) => {
+                for item in &list.children {
+                    footnote_definitions(&item.children, definitions);
                 }
             }
-            Node::Table(n) => {
-                for cell in n.children.iter().flat_map(|row| &row.children) {
-                    visit(&cell.children, f);
-                }
-            }
-            node => {
-                if let Some(children) = inline_children(node) {
-                    visit(children, f);
-                }
-            }
+            // Other blocks can't contain definitions.
+            _ => {}
         }
     }
 }
@@ -143,7 +134,8 @@ struct Renderer<'s, 'v> {
     math: LatexToMathML,
     /// The heading ids used so far.
     ids: HeadingIdPlanner,
-    footnotes: FootnoteNumbers,
+    /// Referenced footnote labels, in the order they are first referenced.
+    footnote_labels: Vec<String>,
     vault: &'v Vault,
     note_dir: &'v Path,
     errors: Vec<String>,
@@ -295,13 +287,10 @@ impl Renderer<'_, '_> {
 
     /// Renders an Obsidian callout (a blockquote starting with `[!type]`) or a plain blockquote.
     fn block_quote(&mut self, quote: &BlockQuote, out: &mut String) {
-        let Some(Node::Paragraph(first)) = quote.children.first() else {
-            out.push_str("<blockquote>\n");
-            self.blocks(&quote.children, false, out);
-            out.push_str("</blockquote>\n");
-            return;
+        let mut title = match quote.children.first() {
+            Some(Node::Paragraph(first)) => pieces(&first.children),
+            _ => Vec::new(),
         };
-        let mut title = pieces(&first.children);
         let callout = match title.first() {
             Some(Piece::Text(text)) => {
                 let line = text.split('\n').next().unwrap();
@@ -500,7 +489,7 @@ impl Renderer<'_, '_> {
                     }
                     Node::Image(image) => out.push_str(&self.image(image)),
                     Node::FootnoteReference(reference) => {
-                        out.push_str(&self.footnotes.reference(reference.identifier));
+                        out.push_str(&self.footnote_reference(reference.identifier));
                     }
                     // The parser options never produce other inline nodes.
                     _ => {}
@@ -612,13 +601,13 @@ impl Renderer<'_, '_> {
     /// referenced, each with a link back to its first reference. Definitions that are never
     /// referenced are dropped, as on GitHub.
     fn footnotes(&mut self, definitions: &HashMap<&str, &FootnoteDefinition>, out: &mut String) {
-        if self.footnotes.labels.is_empty() {
+        if self.footnote_labels.is_empty() {
             return;
         }
         out.push_str("<section class=\"footnotes\">\n<hr />\n<ol>\n");
         // Outputting a footnote can reference more footnotes, which are added to the end.
         let mut index = 0;
-        while let Some(label) = self.footnotes.labels.get(index).cloned() {
+        while let Some(label) = self.footnote_labels.get(index).cloned() {
             index += 1;
             let _ = writeln!(out, "<li id=\"fn-{index}\">");
             let backref = format!(
@@ -639,27 +628,15 @@ impl Renderer<'_, '_> {
         }
         out.push_str("</ol>\n</section>\n");
     }
-}
 
-/// Footnote numbers, assigned in the order footnotes are first referenced.
-#[derive(Default)]
-struct FootnoteNumbers {
-    /// Referenced labels, in order.
-    labels: Vec<String>,
-    /// Each referenced label's number.
-    numbers: HashMap<String, usize>,
-}
-
-impl FootnoteNumbers {
     /// Renders a footnote reference as a link to its footnote, numbering it if it is the first
     /// reference to it.
-    fn reference(&mut self, label: &str) -> String {
-        let (n, id) = if let Some(&n) = self.numbers.get(label) {
-            (n, String::new())
+    fn footnote_reference(&mut self, label: &str) -> String {
+        let (n, id) = if let Some(index) = self.footnote_labels.iter().position(|l| l == label) {
+            (index + 1, String::new())
         } else {
-            let n = self.labels.len() + 1;
-            self.labels.push(label.to_owned());
-            self.numbers.insert(label.to_owned(), n);
+            self.footnote_labels.push(label.to_owned());
+            let n = self.footnote_labels.len();
             (n, format!(" id=\"fnref-{n}\""))
         };
         format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>")
@@ -856,7 +833,7 @@ fn is_remote(link: &str) -> bool {
         })
 }
 
-/// Parses an embed size like `300` or `300x200` into `width` and `height` attributes.
+/// Parses an image size like `300` or `300x200` into `width` and `height` attributes.
 fn size_attrs(size: &str) -> Option<String> {
     let size = size.trim();
     Some(match size.split_once('x') {

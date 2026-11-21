@@ -26,7 +26,7 @@ static HIGHLIGHTER: LazyLock<Highlighter> = LazyLock::new(|| {
 });
 
 // Themes are ordered by key, so the light theme is slot 0 and the dark theme slot 1.
-const THEMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
+static THEMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
     BTreeMap::from([
         ("0".to_owned(), "xcode-light".to_owned()),
         ("1".to_owned(), "xcode-dark".to_owned()),
