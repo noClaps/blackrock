@@ -126,7 +126,7 @@ fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 /// The MIME type of an image file, based on its extension.
-pub fn image_mime_type(path: &Path) -> Option<&'static str> {
+fn image_mime_type(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match extension.as_str() {
         "png" => "image/png",
