@@ -1,111 +1,27 @@
 use std::{collections::HashMap, fmt::Write, ops::Range, path::Path};
 
+use ferromark::{
+    Allocator, HeadingIdPlanner, Parser, ParserOptions,
+    ast::{AlignKind, BlockQuote, FootnoteDefinition, Image, List, Node, Table},
+    collect_heading_text, slugify_heading,
+};
 use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
 use percent_encoding::percent_decode_str;
-use pulldown_cmark::{
-    CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, TextMergeStream, html,
-};
-use pulldown_cmark_escape::{escape_href, escape_html, escape_html_body_text};
 
 use crate::{
+    escape::{attr, href, text},
     highlight,
-    vault::{self, Vault},
+    vault::Vault,
 };
 
-fn options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_MATH
-        | Options::ENABLE_WIKILINKS
-}
-
-/// The info string of the code fences that [`fence_display_math`] puts around `$$` blocks.
-const MATH_FENCE: &str = "blackrock-display-math";
-
-/// Parses markdown into events, turning [`fence_display_math`]'s fences into paragraphs of display
-/// math, which are rendered in a `<div>` like `$$…$$` on its own line.
-fn parse(markdown: &str) -> Vec<Event<'_>> {
-    let mut events = Vec::new();
-    let mut parser = TextMergeStream::new(Parser::new_ext(markdown, options()));
-    while let Some(event) = parser.next() {
-        match event {
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if &*info == MATH_FENCE => {
-                let mut latex = String::new();
-                // Code blocks only contain text, so this stops after the block's end.
-                while let Some(Event::Text(text)) = parser.next() {
-                    latex.push_str(&text);
-                }
-                events.push(Event::Start(Tag::Paragraph));
-                events.push(Event::DisplayMath(latex.into()));
-                events.push(Event::End(TagEnd::Paragraph));
-            }
-            event => events.push(event),
-        }
+fn options() -> ParserOptions {
+    ParserOptions {
+        math: true,
+        highlight: true,
+        image_alt_content: true,
+        autolinks: false,
+        ..ParserOptions::gfm()
     }
-    events
-}
-
-/// Turns each `$$` block, from a line that is just `$$` to the next one, into a code fence, so
-/// that the lines in it can't start lists or other blocks, as in Obsidian. `pulldown-cmark` parses
-/// `$$…$$` as inline math, after the block structure. `$$` lines in code, and a last `$$` line
-/// without a closing one, are left alone.
-fn fence_display_math(markdown: &str) -> String {
-    if !markdown.contains("$$") {
-        return markdown.to_owned();
-    }
-    let code = ranges(markdown, |event| {
-        matches!(event, Event::Start(Tag::CodeBlock(_)) | Event::Code(_))
-    });
-    // Each `$$` line's start, the length of its container prefix (`>`s and indentation) and end.
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for line in markdown.split_inclusive('\n') {
-        let prefix = line.len() - line.trim_start_matches([' ', '\t', '>']).len();
-        if line[prefix..].trim_end() == "$$" && !contains(&code, start + prefix) {
-            lines.push((start, prefix, start + line.len()));
-        }
-        start += line.len();
-    }
-
-    let mut out = String::new();
-    let mut copied = 0;
-    for &[
-        (open, open_prefix, body_start),
-        (close, close_prefix, close_end),
-    ] in lines.as_chunks::<2>().0
-    {
-        let body = &markdown[body_start..close];
-        // The fence must be longer than any run of backticks in the block.
-        let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-        let fence = "`".repeat(longest.max(2) + 1);
-        out.push_str(&markdown[copied..open + open_prefix]);
-        // Writing to a `String` can't fail.
-        let _ = writeln!(out, "{fence}{MATH_FENCE}");
-        out.push_str(body);
-        out.push_str(&markdown[close..close + close_prefix]);
-        out.push_str(&fence);
-        out.push('\n');
-        copied = close_end;
-    }
-    out.push_str(&markdown[copied..]);
-    out
-}
-
-/// The source ranges of the events that `keep` returns true for, in document order.
-fn ranges(markdown: &str, keep: impl Fn(&Event) -> bool) -> Vec<Range<usize>> {
-    Parser::new_ext(markdown, options())
-        .into_offset_iter()
-        .filter(|(event, _)| keep(event))
-        .map(|(_, range)| range)
-        .collect()
-}
-
-/// Whether `i` is in one of `ranges`, which must be in order and not overlap.
-fn contains(ranges: &[Range<usize>], i: usize) -> bool {
-    let index = ranges.partition_point(|range| range.end <= i);
-    ranges.get(index).is_some_and(|range| range.contains(&i))
 }
 
 /// Renders an Obsidian-flavored markdown body (without frontmatter) to an HTML fragment.
@@ -113,369 +29,674 @@ fn contains(ranges: &[Range<usize>], i: usize) -> bool {
 /// Local images are looked up in `vault`, starting from the note's directory `note_dir`
 /// (relative to the vault root). Returns all errors if any image or math can't be rendered.
 pub fn to_html(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
-    let markdown = strip_comments(&fence_display_math(markdown));
-    let events = standalone_block_ids(parse(&markdown));
+    let markdown = strip_comments(markdown);
+    let arena = Allocator::for_source_len(markdown.len());
+    let document = Parser::with_options(&arena, &markdown, options())
+        .parse()
+        .map_err(|err| vec![format!("cannot parse markdown: {err}")])?;
+
+    let mut definitions = HashMap::new();
+    visit(&document.children, &mut |node| {
+        if let Node::FootnoteDefinition(definition) = node {
+            // Like links, the first definition of a label wins.
+            definitions
+                .entry(definition.identifier)
+                .or_insert(&**definition);
+        }
+    });
     let config = MathCoreConfig {
         // Like MathJax in Obsidian, `\newcommand`s stay defined for the rest of the note.
         global_group: true,
         ..Default::default()
     };
     let mut renderer = Renderer {
+        source: &markdown,
         math: LatexToMathML::new(config, Vec::new()).expect("no custom macros"),
-        ids: HashMap::new(),
+        ids: HeadingIdPlanner::new(),
+        footnotes: FootnoteNumbers::default(),
         vault,
         note_dir,
         errors: Vec::new(),
+        link_depth: 0,
+        in_label: false,
+        at_boundary: true,
     };
-    let events = renderer.blocks(events);
-    let events = hoist_figures(events);
-    let events = footnotes(renderer.inlines(events));
-    if !renderer.errors.is_empty() {
-        return Err(renderer.errors);
-    }
     let mut out = String::new();
-    html::push_html(&mut out, events.into_iter());
-    Ok(add_block_ids(&out))
+    renderer.blocks(&document.children, false, &mut out);
+    renderer.footnotes(&definitions, &mut out);
+    if renderer.errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(renderer.errors)
+    }
 }
 
-struct Renderer<'v> {
+/// Inline content with adjacent text merged, since the parser splits text at characters that
+/// could have been markup.
+enum Piece<'n, 'a> {
+    Text(String),
+    Node(&'n Node<'a>),
+}
+
+fn pieces<'n, 'a>(nodes: &'n [Node<'a>]) -> Vec<Piece<'n, 'a>> {
+    let mut pieces = Vec::new();
+    for node in nodes {
+        match (node, pieces.last_mut()) {
+            (Node::Text(text), Some(Piece::Text(last))) => last.push_str(text.value),
+            (Node::Text(text), _) => pieces.push(Piece::Text(text.value.to_owned())),
+            (node, _) => pieces.push(Piece::Node(node)),
+        }
+    }
+    pieces
+}
+
+/// The inline children of a node, if it has any.
+fn inline_children<'n, 'a>(node: &'n Node<'a>) -> Option<&'n [Node<'a>]> {
+    Some(match node {
+        Node::Emphasis(n) => &n.children,
+        Node::Strong(n) => &n.children,
+        Node::Delete(n) => &n.children,
+        Node::Highlight(n) => &n.children,
+        Node::Link(n) => &n.children,
+        Node::Image(n) => &n.alt_content.as_ref()?.children,
+        _ => return None,
+    })
+}
+
+/// Calls `f` on each node and all of its descendants, in document order.
+fn visit<'n, 'a>(nodes: &'n [Node<'a>], f: &mut impl FnMut(&'n Node<'a>)) {
+    for node in nodes {
+        f(node);
+        match node {
+            Node::Paragraph(n) => visit(&n.children, f),
+            Node::Heading(n) => visit(&n.children, f),
+            Node::BlockQuote(n) => visit(&n.children, f),
+            Node::FootnoteDefinition(n) => visit(&n.children, f),
+            Node::List(n) => {
+                for item in &n.children {
+                    visit(&item.children, f);
+                }
+            }
+            Node::Table(n) => {
+                for cell in n.children.iter().flat_map(|row| &row.children) {
+                    visit(&cell.children, f);
+                }
+            }
+            node => {
+                if let Some(children) = inline_children(node) {
+                    visit(children, f);
+                }
+            }
+        }
+    }
+}
+
+struct Renderer<'s, 'v> {
+    /// The parsed markdown, which node spans point into.
+    source: &'s str,
     math: LatexToMathML,
-    /// How often each heading id has been used.
-    ids: HashMap<String, usize>,
+    /// The heading ids used so far.
+    ids: HeadingIdPlanner,
+    footnotes: FootnoteNumbers,
     vault: &'v Vault,
     note_dir: &'v Path,
     errors: Vec<String>,
+    /// How many links we are in. Links can't contain tags, and images in them aren't figures.
+    link_depth: usize,
+    /// Whether we are in an image's label, where nested images are reduced to their labels.
+    in_label: bool,
+    /// Whether the next character starts a word, so a `#` there can start a tag.
+    at_boundary: bool,
 }
 
-impl Renderer<'_> {
-    /// Rewrites code blocks, wikilinks, embeds and callouts.
-    fn blocks<'a>(&mut self, mut events: Vec<Event<'a>>) -> Vec<Event<'a>> {
-        let mut out = Vec::new();
-        // Reversed so that we can pop events off the end and push back the ones we only peeked.
-        events.reverse();
-        // For each open blockquote, whether it is a callout and if so, whether it is foldable.
-        let mut quotes: Vec<Option<Callout>> = Vec::new();
-        // The callout whose title we are currently in.
-        let mut title: Option<Callout> = None;
-        // How many links we are in. Images in links can't be figures.
-        let mut link_depth = 0;
-
-        while let Some(mut event) = events.pop() {
-            match &mut event {
-                Event::Start(Tag::Link {
-                    link_type,
-                    dest_url,
-                    ..
-                }) => {
-                    link_depth += 1;
-                    if let LinkType::WikiLink { .. } = link_type {
-                        *dest_url = wikilink_href(dest_url).into();
-                    } else if let Some((page, id)) = dest_url.split_once("#^")
-                        && is_block_id(id)
-                    {
-                        // Block ids are rendered without their `^`.
-                        *dest_url = format!("{page}#{id}").into();
-                    }
+impl Renderer<'_, '_> {
+    /// Renders blocks, giving a block id on its own line, like `^id` after a table, to the block
+    /// before it. In a tight list item (`tight`), paragraphs aren't wrapped in `<p>`.
+    fn blocks(&mut self, nodes: &[Node], tight: bool, out: &mut String) {
+        let mut nodes = nodes.iter().peekable();
+        while let Some(node) = nodes.next() {
+            let mut html = String::new();
+            match node {
+                // Definitions are output where they are used.
+                Node::Definition(_) | Node::FootnoteDefinition(_) => continue,
+                Node::Paragraph(paragraph) if tight => {
+                    html = self.paragraph(&pieces(&paragraph.children), false);
                 }
-                Event::End(TagEnd::Link) => link_depth -= 1,
-                _ => {}
+                node => {
+                    if tight && !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    self.block(node, &mut html);
+                }
             }
-            match event {
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    out.push(Event::Html(code_block(&kind, &mut events).into()));
-                }
-                Event::Start(Tag::Image {
-                    link_type,
-                    dest_url,
-                    title,
-                    id,
-                }) => {
-                    let label = image_label(&mut events);
-                    match link_type {
-                        // Other files, like notes, can't be embedded, so they become links.
-                        LinkType::WikiLink { .. } if !is_image(&dest_url) => {
-                            out.push(Event::Start(Tag::Link {
-                                link_type,
-                                dest_url: wikilink_href(&dest_url).into(),
-                                title,
-                                id,
-                            }));
-                            out.extend(label);
-                            out.push(Event::End(TagEnd::Link));
-                        }
-                        // The parser never puts wikilink images inside links.
-                        LinkType::WikiLink { has_pothole } => {
-                            let label = if has_pothole { label } else { Vec::new() };
-                            out.push(self.image(&dest_url, label, true, "", false));
-                        }
-                        _ => {
-                            let link = percent_decode_str(&dest_url).decode_utf8_lossy();
-                            let in_link = link_depth > 0;
-                            out.push(self.image(&link, label, false, &title, in_link));
-                        }
-                    }
-                }
-                Event::Start(Tag::BlockQuote(kind)) => {
-                    let callout = start_callout(&mut events, &mut out);
-                    if callout.is_none() {
-                        out.push(Event::Start(Tag::BlockQuote(kind)));
-                    }
-                    quotes.push(callout.clone());
-                    title = callout;
-                }
-                Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph)
-                    if title.is_some() =>
-                {
-                    let callout = title.take().unwrap();
-                    out.push(Event::Html(callout.end_title().into()));
-                    if !matches!(event, Event::End(TagEnd::Paragraph)) {
-                        // The rest of the first paragraph is the start of the callout's content.
-                        events.push(Event::Start(Tag::Paragraph));
-                    }
-                }
-                Event::End(TagEnd::BlockQuote(kind)) => match quotes.pop().flatten() {
-                    Some(callout) => out.push(Event::Html(callout.close().into())),
-                    None => out.push(Event::End(TagEnd::BlockQuote(kind))),
-                },
-                // Tables are wrapped in a `<div>`, like math blocks.
-                event @ Event::Start(Tag::Table(_)) => {
-                    out.push(Event::Html("<div>\n".into()));
-                    out.push(event);
-                }
-                event @ Event::End(TagEnd::Table) => {
-                    out.push(event);
-                    out.push(Event::Html("</div>\n".into()));
-                }
-                event => out.push(event),
+            while let Some(id) = nodes.peek().and_then(|node| standalone_block_id(node)) {
+                add_id(&mut html, &id);
+                nodes.next();
             }
+            out.push_str(&html);
         }
-        out
     }
 
-    /// Processes each run of inline content, see [`Self::run`].
-    fn inlines<'a>(&mut self, events: Vec<Event<'a>>) -> Vec<Event<'a>> {
-        let mut out = Vec::new();
-        let mut run = Vec::new();
-        for event in events {
-            if is_inline(&event) {
-                run.push(event);
-            } else if run.is_empty() {
-                out.push(event);
-            } else {
-                let end = self.run(&mut out, std::mem::take(&mut run), event);
-                out.push(end);
+    fn block(&mut self, node: &Node, out: &mut String) {
+        match node {
+            Node::Paragraph(paragraph) => {
+                let mut pieces = pieces(&paragraph.children);
+                let id = strip_block_id(&mut pieces);
+                let mut html = self.paragraph(&pieces, true);
+                if let Some(id) = id {
+                    add_id(&mut html, &id);
+                }
+                out.push_str(&html);
             }
-        }
-        // Inline content is always inside a block, so `run` is empty here.
-        out
-    }
-
-    /// Renders math, `==highlights==` and `#tags` in a run of inline events, strips a trailing
-    /// `^block-id` and gives headings ids.
-    ///
-    /// The block containing the run has already been pushed to `out`, and `end` is the event after
-    /// the run. Returns the (possibly rewritten) `end` event.
-    fn run<'a>(
-        &mut self,
-        out: &mut Vec<Event<'a>>,
-        mut run: Vec<Event<'a>>,
-        mut end: Event<'a>,
-    ) -> Event<'a> {
-        match out.last_mut() {
-            Some(Event::Start(Tag::Heading { id: id @ None, .. })) => {
-                *id = Some(self.unique_id(slugify(&plain_text(&run))).into());
+            Node::Heading(heading) => {
+                let pieces = pieces(&heading.children);
+                let id =
+                    (self.ids).plan(&slugify_heading(&collect_heading_text(&heading.children)));
+                let level = heading.depth;
+                let _ = write!(out, "<h{level} id=\"{}\">", attr(&id));
+                self.inlines(&pieces, out);
+                let _ = writeln!(out, "</h{level}>");
             }
-            // A `$$…$$` block on its own is rendered in a `<div>` instead of a paragraph.
-            Some(start @ Event::Start(Tag::Paragraph))
-                if is_display_math_only(&run) && end == Event::End(TagEnd::Paragraph) =>
-            {
-                *start = Event::Html("<div>".into());
-                end = Event::Html("</div>\n".into());
+            Node::ThematicBreak(_) => out.push_str("<hr />\n"),
+            Node::BlockQuote(quote) => self.block_quote(quote, out),
+            Node::List(list) => self.list(list, out),
+            Node::CodeBlock(code) => {
+                out.push_str(&code_block(code.lang.unwrap_or(""), code.value));
             }
-            Some(Event::Start(Tag::Paragraph | Tag::Item)) => {
-                if let Some(block_id) = strip_block_id(&mut run) {
-                    out.insert(out.len() - 1, block_id_marker(&block_id));
+            Node::MathBlock(math) => {
+                let source = &self.source[math.span.start as usize..math.span.end as usize];
+                let mut html = String::new();
+                if source.trim_end().contains('\n') {
+                    html = self.math(math.value, MathDisplay::Block);
+                } else {
+                    // The parser reads a line like `$$a$$ $$b$$` as one block, `a$$ $$b`.
+                    for (index, part) in math.value.split("$$").enumerate() {
+                        if index % 2 == 0 {
+                            html.push_str(&self.math(part, MathDisplay::Block));
+                        } else {
+                            html.push_str(&text(part));
+                        }
+                    }
+                }
+                let _ = writeln!(out, "<div>{html}</div>");
+            }
+            Node::Html(html) => {
+                out.push_str(html.value);
+                if !html.value.ends_with('\n') {
+                    out.push('\n');
                 }
             }
+            Node::Table(table) => self.table(table, out),
+            // The parser options never produce other blocks.
             _ => {}
         }
-
-        let highlights = find_highlights(&run);
-        let mut highlights = highlights.iter().peekable();
-        let mut processed = Vec::new();
-        let mut link_depth = 0;
-        let mut at_boundary = true;
-        for (index, event) in run.into_iter().enumerate() {
-            let next_at_boundary = matches!(event, Event::SoftBreak | Event::HardBreak);
-            match event {
-                Event::InlineMath(_) | Event::DisplayMath(_) => processed.push(self.math(event)),
-                Event::Text(text) => {
-                    let mut marks = Vec::new();
-                    while let Some(&(_, offset, open)) =
-                        highlights.next_if(|(event, _, _)| *event == index)
-                    {
-                        marks.push((offset, open));
-                    }
-                    split_text(&text, &marks, link_depth == 0, at_boundary, &mut processed);
-                }
-                event => {
-                    match event {
-                        Event::Start(Tag::Link { .. }) => link_depth += 1,
-                        Event::End(TagEnd::Link) => link_depth -= 1,
-                        _ => {}
-                    }
-                    processed.push(event);
-                }
-            }
-            at_boundary = next_at_boundary;
-        }
-        out.extend(processed);
-        end
     }
 
-    /// Renders an image. Local images are embedded as `data:` URLs.
+    /// Renders a paragraph, or the content of a tight list item if `wrap` is false.
     ///
-    /// The label holds the alt text and optionally a size, as in `alt|300` or `alt|300x200`. For
-    /// wikilinks, the label can also be just a size. An image with alt text becomes a figure,
-    /// unless it is inside a link, with the label's markup (and rendered math) as its caption and
-    /// its plain text (with math as LaTeX) as the alt text.
-    fn image<'a>(
-        &mut self,
-        link: &str,
-        mut label: Vec<Event>,
-        is_wikilink: bool,
-        title: &str,
-        in_link: bool,
-    ) -> Event<'a> {
-        // The size follows the last `|`, which must be in the label's last text.
-        let whole_label_is_size = is_wikilink && label.len() == 1;
+    /// Figures are moved out of the paragraph, splitting it around them, since `<p>` can't
+    /// contain `<figure>`. A paragraph of only `$$…$$` is rendered in a `<div>` instead.
+    fn paragraph(&mut self, pieces: &[Piece], wrap: bool) -> String {
+        let mut html = String::new();
+        let mut text = String::new();
+        let flush = |html: &mut String, text: &mut String| {
+            let content = text.trim();
+            if !content.is_empty() {
+                if wrap {
+                    let _ = writeln!(html, "<p>{content}</p>");
+                } else {
+                    html.push_str(content);
+                }
+            }
+            text.clear();
+        };
+        if wrap && self.is_display_math_only(pieces) {
+            self.at_boundary = true;
+            self.inlines(pieces, &mut text);
+            let _ = writeln!(html, "<div>{}</div>", text.trim());
+            return html;
+        }
+        self.at_boundary = true;
+        for piece in pieces {
+            if let Piece::Node(Node::Image(image)) = piece
+                && let Some(figure) = self.figure(image)
+            {
+                flush(&mut html, &mut text);
+                html.push_str(&figure);
+                self.at_boundary = true;
+            } else {
+                self.inlines(std::slice::from_ref(piece), &mut text);
+            }
+        }
+        flush(&mut html, &mut text);
+        html
+    }
+
+    fn is_display_math_only(&self, pieces: &[Piece]) -> bool {
+        let is_display = |piece: &Piece| matches!(piece, Piece::Node(Node::InlineMath(math)) if self.is_display(math.span));
+        pieces.iter().any(is_display)
+            && pieces.iter().all(|piece| match piece {
+                Piece::Text(text) => text.trim().is_empty(),
+                Piece::Node(Node::Break(_)) => true,
+                piece @ Piece::Node(_) => is_display(piece),
+            })
+    }
+
+    /// Whether inline math is `$$…$$`, which is displayed as a block.
+    fn is_display(&self, span: ferromark::ast::Span) -> bool {
+        self.source[span.start as usize..].starts_with("$$")
+    }
+
+    /// Renders an Obsidian callout (a blockquote starting with `[!type]`) or a plain blockquote.
+    fn block_quote(&mut self, quote: &BlockQuote, out: &mut String) {
+        let Some(Node::Paragraph(first)) = quote.children.first() else {
+            out.push_str("<blockquote>\n");
+            self.blocks(&quote.children, false, out);
+            out.push_str("</blockquote>\n");
+            return;
+        };
+        let mut title = pieces(&first.children);
+        let callout = match title.first() {
+            Some(Piece::Text(text)) => {
+                let line = text.split('\n').next().unwrap();
+                Callout::parse(line).map(|(callout, rest)| (callout, rest.len()))
+            }
+            _ => None,
+        };
+        let Some((callout, rest_len)) = callout else {
+            out.push_str("<blockquote>\n");
+            self.blocks(&quote.children, false, out);
+            out.push_str("</blockquote>\n");
+            return;
+        };
+
+        // The title is the rest of the first line, and the rest of the paragraph is the start of
+        // the content.
+        let Some(Piece::Text(text)) = title.first_mut() else {
+            unreachable!()
+        };
+        let line_len = text.find('\n').unwrap_or(text.len());
+        *text = text[line_len - rest_len..].to_owned();
+        let mut content = Vec::new();
+        let line_end = title.iter().position(|piece| match piece {
+            Piece::Text(text) => text.contains('\n'),
+            Piece::Node(node) => matches!(node, Node::Break(_)),
+        });
+        if let Some(index) = line_end {
+            content = title.split_off(index + 1);
+            // A line break is dropped.
+            if let Some(Piece::Text(text)) = title.pop() {
+                let (before, after) = text.split_once('\n').unwrap();
+                title.push(Piece::Text(before.to_owned()));
+                content.insert(0, Piece::Text(after.to_owned()));
+            }
+        }
+        let is_blank = |pieces: &[Piece]| {
+            (pieces.iter())
+                .all(|piece| matches!(piece, Piece::Text(text) if text.trim().is_empty()))
+        };
+        if is_blank(&title) {
+            title = vec![Piece::Text(callout.default_title())];
+        }
+
+        out.push_str(&callout.open());
+        self.at_boundary = true;
+        self.inlines(&title, out);
+        out.push_str(&callout.end_title());
+        if !is_blank(&content) {
+            let id = strip_block_id(&mut content);
+            let mut html = self.paragraph(&content, true);
+            if let Some(id) = id {
+                add_id(&mut html, &id);
+            }
+            out.push_str(&html);
+        }
+        self.blocks(&quote.children[1..], false, out);
+        out.push_str(&callout.close());
+    }
+
+    fn list(&mut self, list: &List, out: &mut String) {
+        let tight = !list.spread && list.children.iter().all(|item| !item.spread);
+        let close = match (list.ordered, list.start) {
+            (false, _) => {
+                out.push_str("<ul>\n");
+                "</ul>\n"
+            }
+            (true, None | Some(1)) => {
+                out.push_str("<ol>\n");
+                "</ol>\n"
+            }
+            (true, Some(start)) => {
+                let _ = writeln!(out, "<ol start=\"{start}\">");
+                "</ol>\n"
+            }
+        };
+        for item in &list.children {
+            let mut html = String::from("<li>");
+            if let Some(checked) = item.checked {
+                let checked = if checked { " checked=\"\"" } else { "" };
+                let _ = writeln!(html, "<input disabled=\"\" type=\"checkbox\"{checked}/>");
+            } else if !tight {
+                html.push('\n');
+            }
+            let mut children = &item.children[..];
+            let mut id = None;
+            // In a tight item, a block id ending the first paragraph goes on the item.
+            if tight && let Some(Node::Paragraph(paragraph)) = children.first() {
+                let mut pieces = pieces(&paragraph.children);
+                id = strip_block_id(&mut pieces);
+                html.push_str(&self.paragraph(&pieces, false));
+                children = &children[1..];
+            }
+            self.blocks(children, tight, &mut html);
+            html.push_str("</li>\n");
+            if let Some(id) = id {
+                add_id(&mut html, &id);
+            }
+            out.push_str(&html);
+        }
+        out.push_str(close);
+    }
+
+    fn table(&mut self, table: &Table, out: &mut String) {
+        out.push_str("<div>\n<table>");
+        for (index, row) in table.children.iter().enumerate() {
+            let cell_tag = if index == 0 {
+                out.push_str("<thead>");
+                "th"
+            } else {
+                "td"
+            };
+            out.push_str("<tr>");
+            for (column, cell) in row.children.iter().enumerate() {
+                let style = match table.align.get(column) {
+                    Some(AlignKind::Left) => " style=\"text-align: left\"",
+                    Some(AlignKind::Center) => " style=\"text-align: center\"",
+                    Some(AlignKind::Right) => " style=\"text-align: right\"",
+                    _ => "",
+                };
+                let _ = write!(out, "<{cell_tag}{style}>");
+                self.at_boundary = true;
+                self.inlines(&pieces(&cell.children), out);
+                let _ = write!(out, "</{cell_tag}>");
+            }
+            out.push_str(if index == 0 {
+                "</tr></thead><tbody>\n"
+            } else {
+                "</tr>\n"
+            });
+        }
+        out.push_str("</tbody></table>\n</div>\n");
+    }
+
+    fn inlines(&mut self, pieces: &[Piece], out: &mut String) {
+        for piece in pieces {
+            match piece {
+                Piece::Text(text) => self.text(text, out),
+                Piece::Node(node) => self.inline(node, out),
+            }
+        }
+    }
+
+    fn inline(&mut self, node: &Node, out: &mut String) {
+        let wrap = |this: &mut Self, tag: &str, children: &[Node], out: &mut String| {
+            let _ = write!(out, "<{tag}>");
+            this.inlines(&pieces(children), out);
+            let _ = write!(out, "</{tag}>");
+        };
+        match node {
+            Node::Text(text) => self.text(text.value, out),
+            Node::Emphasis(n) => wrap(self, "em", &n.children, out),
+            Node::Strong(n) => wrap(self, "strong", &n.children, out),
+            Node::Delete(n) => wrap(self, "del", &n.children, out),
+            Node::Highlight(n) => {
+                self.at_boundary = true;
+                wrap(self, "mark", &n.children, out);
+                self.at_boundary = true;
+            }
+            Node::Break(_) => {
+                out.push_str("<br />\n");
+                self.at_boundary = true;
+            }
+            Node::Link(link) => {
+                let url = match link.url.split_once("#^") {
+                    // Block ids are rendered without their `^`.
+                    Some((page, id)) if is_block_id(id) => format!("{page}#{id}"),
+                    _ => link.url.to_owned(),
+                };
+                let _ = write!(out, "<a href=\"{}\"", href(&url));
+                if let Some(title) = link.title.filter(|title| !title.is_empty()) {
+                    let _ = write!(out, " title=\"{}\"", attr(title));
+                }
+                out.push('>');
+                self.link_depth += 1;
+                self.inlines(&pieces(&link.children), out);
+                self.link_depth -= 1;
+                out.push_str("</a>");
+                self.at_boundary = false;
+            }
+            node => {
+                match node {
+                    Node::InlineCode(code) => {
+                        let _ = write!(out, "<code>{}</code>", text(code.value));
+                    }
+                    Node::InlineMath(math) => {
+                        let display = if self.is_display(math.span) {
+                            MathDisplay::Block
+                        } else {
+                            MathDisplay::Inline
+                        };
+                        out.push_str(&self.math(math.value, display));
+                    }
+                    Node::Html(html) => out.push_str(html.value),
+                    Node::Image(image) if self.in_label => {
+                        self.inlines(&Self::label(image).0, out);
+                    }
+                    Node::Image(image) => out.push_str(&self.image(image)),
+                    Node::FootnoteReference(reference) => {
+                        out.push_str(&self.footnotes.reference(reference.identifier));
+                    }
+                    // The parser options never produce other inline nodes.
+                    _ => {}
+                }
+                self.at_boundary = false;
+            }
+        }
+    }
+
+    /// Renders text, turning `#tags` outside links into tag links.
+    fn text(&mut self, s: &str, out: &mut String) {
+        let tags = self.link_depth == 0 && !self.in_label;
+        let mut plain_start = 0;
+        let mut i = 0;
+        while let Some(c) = s[i..].chars().next() {
+            if c == '#' && tags && self.at_boundary {
+                let tag = tag_at(&s[i + 1..]);
+                if !tag.is_empty() {
+                    out.push_str(&text(&s[plain_start..i]));
+                    out.push_str(&tag_html(tag));
+                    i += 1 + tag.len();
+                    plain_start = i;
+                    self.at_boundary = false;
+                    continue;
+                }
+            }
+            self.at_boundary = c.is_whitespace();
+            i += c.len_utf8();
+        }
+        out.push_str(&text(&s[plain_start..]));
+    }
+
+    /// An image's label and size attributes.
+    ///
+    /// The label is its alt text, which can end with a size, as in `alt|300` or `alt|300x200`.
+    fn label<'n, 'a>(image: &'n Image<'a>) -> (Vec<Piece<'n, 'a>>, String) {
+        let mut label =
+            (image.alt_content.as_ref()).map_or_else(Vec::new, |alt| pieces(&alt.children));
         let mut size = String::new();
-        if let Some(Event::Text(last)) = label.last_mut()
+        // The size follows the last `|`, which must be in the label's last text.
+        if let Some(Piece::Text(last)) = label.last_mut()
             && let Some((alt, attrs)) = (last.rsplit_once('|'))
-                .or(whole_label_is_size.then_some(("", last)))
                 .and_then(|(alt, size)| Some((alt.to_owned(), size_attrs(size)?)))
         {
             size = attrs;
-            *last = alt.into();
+            *last = alt;
         }
+        (label, size)
+    }
+
+    /// Renders an image with alt text outside links as a figure, with the label's markup (and
+    /// rendered math) as its caption. Returns `None` for other images.
+    fn figure(&mut self, image: &Image) -> Option<String> {
+        let (label, _) = Self::label(image);
+        if self.link_depth > 0 || plain_text(&label).trim().is_empty() {
+            return None;
+        }
+        let img = self.image(image);
+        let mut caption = String::new();
+        self.in_label = true;
+        self.inlines(&label, &mut caption);
+        self.in_label = false;
+        Some(format!(
+            "<figure>\n{img}\n<figcaption>{}</figcaption>\n</figure>\n",
+            caption.trim()
+        ))
+    }
+
+    /// Renders an `<img>`, with the label's plain text (with math as LaTeX) as its alt text. Local
+    /// images are embedded as `data:` URLs.
+    fn image(&mut self, image: &Image) -> String {
+        let (label, size) = Self::label(image);
         let alt = plain_text(&label);
-        let alt = alt.trim();
-
-        let src = if is_remote(link) {
-            href(link)
+        let link = percent_decode_str(image.url).decode_utf8_lossy();
+        let src = if is_remote(&link) {
+            href(&link)
         } else {
-            match self.vault.image_data_url(link, self.note_dir) {
+            match self.vault.image_data_url(&link, self.note_dir) {
                 Ok(data_url) => data_url,
-                Err(err) => return self.error(err.to_string()),
+                Err(err) => {
+                    self.errors.push(err.to_string());
+                    return String::new();
+                }
             }
         };
-        let title = if title.is_empty() {
-            String::new()
-        } else {
-            format!(" title=\"{}\"", attr(title))
+        let title = match image.title.filter(|title| !title.is_empty()) {
+            Some(title) => format!(" title=\"{}\"", attr(title)),
+            None => String::new(),
         };
-        let html = format!("<img src=\"{src}\" alt=\"{}\"{title}{size}>", attr(alt));
-
-        if alt.is_empty() || in_link {
-            Event::InlineHtml(html.into())
-        } else {
-            let mut figcaption = String::new();
-            let label = label.into_iter().map(|event| self.math(event));
-            html::push_html(&mut figcaption, label);
-            let figcaption = figcaption.trim();
-            // A block-level event, which `hoist_figures` moves out of paragraphs.
-            Event::Html(
-                format!("<figure>\n{html}\n<figcaption>{figcaption}</figcaption>\n</figure>\n")
-                    .into(),
-            )
-        }
+        format!(
+            "<img src=\"{src}\" alt=\"{}\"{title}{size}>",
+            attr(alt.trim())
+        )
     }
 
-    /// Converts a math event's LaTeX to a MathML Core `<math>` element. Other events are returned
-    /// unchanged.
-    fn math<'a>(&mut self, event: Event<'a>) -> Event<'a> {
-        let (latex, display) = match &event {
-            Event::InlineMath(latex) => (latex, MathDisplay::Inline),
-            Event::DisplayMath(latex) => (latex, MathDisplay::Block),
-            _ => return event,
-        };
+    /// Converts LaTeX to a MathML Core `<math>` element.
+    fn math(&mut self, latex: &str, display: MathDisplay) -> String {
         match self.math.convert_with_global_state(latex, display) {
-            Ok(result) => Event::InlineHtml(result.mathml.into()),
-            Err(err) => self.error(format!("cannot render math `{}`: {err}", latex.trim())),
-        }
-    }
-
-    /// Records an error, returning an empty event to use in place of what couldn't be rendered.
-    fn error<'a>(&mut self, err: String) -> Event<'a> {
-        self.errors.push(err);
-        Event::InlineHtml("".into())
-    }
-
-    /// Makes `id` unique within the document by appending a number if needed.
-    fn unique_id(&mut self, id: String) -> String {
-        let count = self.ids.entry(id.clone()).or_insert(0);
-        *count += 1;
-        match *count {
-            1 => id,
-            n => format!("{id}-{}", n - 1),
-        }
-    }
-}
-
-fn is_inline(event: &Event) -> bool {
-    match event {
-        Event::Text(_)
-        | Event::Code(_)
-        | Event::InlineMath(_)
-        | Event::DisplayMath(_)
-        | Event::InlineHtml(_)
-        | Event::SoftBreak
-        | Event::HardBreak
-        | Event::FootnoteReference(_)
-        | Event::TaskListMarker(_) => true,
-        Event::Start(tag) => matches!(
-            tag,
-            Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. }
-        ),
-        Event::End(tag) => matches!(
-            tag,
-            TagEnd::Emphasis
-                | TagEnd::Strong
-                | TagEnd::Strikethrough
-                | TagEnd::Link
-                | TagEnd::Image
-        ),
-        _ => false,
-    }
-}
-
-fn plain_text(run: &[Event]) -> String {
-    let mut text = String::new();
-    for event in run {
-        match event {
-            Event::Text(s) | Event::Code(s) | Event::InlineMath(s) | Event::DisplayMath(s) => {
-                text.push_str(s);
+            Ok(result) => result.mathml,
+            Err(err) => {
+                let err = format!("cannot render math `{}`: {err}", latex.trim());
+                self.errors.push(err);
+                String::new()
             }
-            Event::SoftBreak | Event::HardBreak => text.push(' '),
-            _ => {}
+        }
+    }
+
+    /// Outputs the referenced footnotes in a list, numbered in the order they are first
+    /// referenced, each with a link back to its first reference. Definitions that are never
+    /// referenced are dropped, as on GitHub.
+    fn footnotes(&mut self, definitions: &HashMap<&str, &FootnoteDefinition>, out: &mut String) {
+        if self.footnotes.labels.is_empty() {
+            return;
+        }
+        out.push_str("<section class=\"footnotes\">\n<hr />\n<ol>\n");
+        // Outputting a footnote can reference more footnotes, which are added to the end.
+        let mut index = 0;
+        while let Some(label) = self.footnotes.labels.get(index).cloned() {
+            index += 1;
+            let _ = writeln!(out, "<li id=\"fn-{index}\">");
+            let backref = format!(
+                "<a href=\"#fnref-{index}\" class=\"footnote-backref\" \
+                 aria-label=\"Back to reference {index}\">\u{21a9}\u{fe0e}</a>"
+            );
+            let mut body = String::new();
+            let children = definitions.get(&*label).map_or(&[][..], |d| &d.children);
+            self.blocks(children, false, &mut body);
+            // The link back goes at the end of the last paragraph, or in a paragraph of its own.
+            if matches!(children.last(), Some(Node::Paragraph(_))) && body.ends_with("</p>\n") {
+                body.insert_str(body.len() - "</p>\n".len(), &format!(" {backref}"));
+            } else {
+                let _ = writeln!(body, "<p>{backref}</p>");
+            }
+            out.push_str(&body);
+            out.push_str("</li>\n");
+        }
+        out.push_str("</ol>\n</section>\n");
+    }
+}
+
+/// Footnote numbers, assigned in the order footnotes are first referenced.
+#[derive(Default)]
+struct FootnoteNumbers {
+    /// Referenced labels, in order.
+    labels: Vec<String>,
+    /// Each referenced label's number.
+    numbers: HashMap<String, usize>,
+}
+
+impl FootnoteNumbers {
+    /// Renders a footnote reference as a link to its footnote, numbering it if it is the first
+    /// reference to it.
+    fn reference(&mut self, label: &str) -> String {
+        let (n, id) = if let Some(&n) = self.numbers.get(label) {
+            (n, String::new())
+        } else {
+            let n = self.labels.len() + 1;
+            self.labels.push(label.to_owned());
+            self.numbers.insert(label.to_owned(), n);
+            (n, format!(" id=\"fnref-{n}\""))
+        };
+        format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>")
+    }
+}
+
+/// The plain text of inline content, with math as LaTeX and images as their labels.
+fn plain_text(pieces: &[Piece]) -> String {
+    let mut text = String::new();
+    for piece in pieces {
+        match piece {
+            // Line breaks within a paragraph are spaces.
+            Piece::Text(s) => text.extend(s.chars().map(|c| if c == '\n' { ' ' } else { c })),
+            Piece::Node(node) => match node {
+                Node::InlineCode(code) => text.push_str(code.value),
+                Node::InlineMath(math) => text.push_str(math.value),
+                Node::Break(_) => text.push(' '),
+                node => {
+                    if let Some(children) = inline_children(node) {
+                        text.push_str(&plain_text(&self::pieces(children)));
+                    }
+                }
+            },
         }
     }
     text
 }
 
-fn is_display_math_only(run: &[Event]) -> bool {
-    run.iter()
-        .any(|event| matches!(event, Event::DisplayMath(_)))
-        && run.iter().all(|event| match event {
-            Event::DisplayMath(_) | Event::SoftBreak | Event::HardBreak => true,
-            Event::Text(text) => text.trim().is_empty(),
-            _ => false,
-        })
+/// The id of a paragraph that is just a block id, like `^id`.
+fn standalone_block_id(node: &Node) -> Option<String> {
+    let Node::Paragraph(paragraph) = node else {
+        return None;
+    };
+    let [Piece::Text(text)] = &pieces(&paragraph.children)[..] else {
+        return None;
+    };
+    let id = text.trim().strip_prefix('^')?;
+    is_block_id(id).then(|| id.to_owned())
 }
 
 /// Removes a trailing ` ^block-id` from a paragraph or list item, returning `block-id`.
-fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
-    let Some(Event::Text(text)) = run.last() else {
+fn strip_block_id(pieces: &mut Vec<Piece>) -> Option<String> {
+    let Some(Piece::Text(text)) = pieces.last() else {
         return None;
     };
     let trimmed = text.trim_end();
@@ -485,20 +706,20 @@ fn strip_block_id(run: &mut Vec<Event>) -> Option<String> {
     // The id must be separated from the content before it, and there must be content.
     let separated = before.ends_with(char::is_whitespace)
         || (before.is_empty()
-            && run.len() > 1
-            && matches!(run[run.len() - 2], Event::SoftBreak | Event::HardBreak));
+            && pieces.len() > 1
+            && matches!(pieces[pieces.len() - 2], Piece::Node(Node::Break(_))));
     if !is_block_id(id) || !separated {
         return None;
     }
     let block_id = id.to_owned();
     let kept = before.trim_end().to_owned();
-    run.pop();
+    pieces.pop();
     if kept.is_empty() {
-        if matches!(run.last(), Some(Event::SoftBreak | Event::HardBreak)) {
-            run.pop();
+        if matches!(pieces.last(), Some(Piece::Node(Node::Break(_)))) {
+            pieces.pop();
         }
     } else {
-        run.push(Event::Text(kept.into()));
+        pieces.push(Piece::Text(kept));
     }
     Some(block_id)
 }
@@ -507,177 +728,17 @@ fn is_block_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Gives a block id on its own line, like `^id` after a table or a `$$…$$` block, to the block
-/// before it. `pulldown-cmark` can't add attributes to most elements, so this puts a marker before
-/// the block, which [`add_block_ids`] turns into an `id` on its opening tag.
-fn standalone_block_ids(mut events: Vec<Event>) -> Vec<Event> {
-    let mut out = Vec::new();
-    // Reversed so that we can pop events off the end and peek at the next ones.
-    events.reverse();
-    // The `out` index of each open element's start.
-    let mut starts = Vec::new();
-    // For each open element (and the document), the `out` index of its last child block's start.
-    let mut last_child = vec![None];
-    while let Some(event) = events.pop() {
-        let id = match (&event, events.last(), events.iter().rev().nth(1)) {
-            (
-                Event::Start(Tag::Paragraph),
-                Some(Event::Text(text)),
-                Some(Event::End(TagEnd::Paragraph)),
-            ) => text.trim().strip_prefix('^').filter(|id| is_block_id(id)),
-            _ => None,
-        };
-        if let (Some(id), Some(Some(start))) = (id, last_child.last()) {
-            out.insert(*start, block_id_marker(id));
-            events.pop(); // Text
-            events.pop(); // End(Paragraph)
-            continue;
-        }
-        match event {
-            Event::Start(_) => {
-                starts.push(out.len());
-                last_child.push(None);
-            }
-            Event::End(_) => {
-                last_child.pop();
-                *last_child.last_mut().unwrap() = starts.pop();
-            }
-            _ => *last_child.last_mut().unwrap() = Some(out.len()),
-        }
-        out.push(event);
+/// Adds an `id` to the first element in `html`, unless it already has one.
+fn add_id(html: &mut String, id: &str) {
+    let tag = &html[..html.find('>').unwrap_or(html.len())];
+    if let Some(name) = tag.strip_prefix('<')
+        && !tag.contains(" id=")
+    {
+        let name_end = 1 + name
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(name.len());
+        html.insert_str(name_end, &format!(" id=\"{}\"", attr(id)));
     }
-    out
-}
-
-/// A marker that [`add_block_ids`] turns into an `id` on the opening tag of the element after it.
-fn block_id_marker<'a>(id: &str) -> Event<'a> {
-    // NUL never appears in the output otherwise, since the parser replaces it.
-    Event::Html(format!("\0{id}\0\n").into())
-}
-
-/// Replaces each [`block_id_marker`] with an `id` on the element after it,
-/// unless that element already has one.
-fn add_block_ids(html: &str) -> String {
-    let mut out = String::new();
-    let mut rest = html;
-    while let Some((before, marked)) = rest.split_once('\0') {
-        let (id, after) = marked.split_once("\0\n").unwrap();
-        out.push_str(before);
-        rest = after;
-        let tag = &after[..after.find('>').unwrap_or(after.len())];
-        if let Some(name) = tag.strip_prefix('<')
-            && !tag.contains(" id=")
-        {
-            let name_end = 1 + name
-                .find(|c: char| !c.is_ascii_alphanumeric())
-                .unwrap_or(name.len());
-            // Writing to a `String` can't fail.
-            let _ = write!(out, "{} id=\"{id}\"", &after[..name_end]);
-            rest = &after[name_end..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Finds matching `==` pairs in a run, returning `(event index, byte offset, is opening)`.
-///
-/// Like emphasis, an opening `==` must be followed by a non-space and a closing `==` preceded by
-/// a non-space. Both must be at the same level of inline nesting, so the `<mark>` elements nest
-/// properly with other inline elements.
-fn find_highlights(run: &[Event]) -> Vec<(usize, usize, bool)> {
-    let mut marks = Vec::new();
-    // The opening mark (event index, offset, nesting depth) waiting to be closed.
-    let mut open: Option<(usize, usize, usize)> = None;
-    let mut depth = 0;
-    for (index, event) in run.iter().enumerate() {
-        let text = match event {
-            Event::Start(_) => {
-                depth += 1;
-                continue;
-            }
-            Event::End(_) => {
-                depth -= 1;
-                if open.is_some_and(|(_, _, open_depth)| open_depth > depth) {
-                    open = None;
-                }
-                continue;
-            }
-            Event::Text(text) => text,
-            _ => continue,
-        };
-        let mut i = 0;
-        while let Some(found) = text[i..].find("==") {
-            let at = i + found;
-            let before = text[..at].chars().next_back();
-            let after = text[at + 2..].chars().next();
-            match open {
-                None if before != Some('=')
-                    && after.is_none_or(|c| !c.is_whitespace() && c != '=') =>
-                {
-                    open = Some((index, at, depth));
-                }
-                Some((open_index, open_offset, open_depth))
-                    if after != Some('=')
-                        && open_depth == depth
-                        && before.is_none_or(|c| !c.is_whitespace() && c != '=') =>
-                {
-                    marks.push((open_index, open_offset, true));
-                    marks.push((index, at, false));
-                    open = None;
-                }
-                _ => {}
-            }
-            // No mark can start at `at + 1`, since marks can't be next to another `=`.
-            i = at + 1;
-        }
-    }
-    marks
-}
-
-/// Splits a text event at `==` marks (byte offset, is opening) and, if `tags` is set, `#tags`.
-fn split_text<'a>(
-    text: &str,
-    marks: &[(usize, bool)],
-    tags: bool,
-    mut at_boundary: bool,
-    out: &mut Vec<Event<'a>>,
-) {
-    let mut marks = marks.iter().peekable();
-    let mut plain_start = 0;
-    let mut i = 0;
-    let flush = |out: &mut Vec<Event<'a>>, range: Range<usize>| {
-        if !range.is_empty() {
-            out.push(Event::Text(text[range].to_owned().into()));
-        }
-    };
-    while i < text.len() {
-        if let Some(&(_, open)) = marks.next_if(|(offset, _)| *offset == i) {
-            flush(out, plain_start..i);
-            out.push(Event::InlineHtml(
-                if open { "<mark>" } else { "</mark>" }.into(),
-            ));
-            i += 2;
-            plain_start = i;
-            at_boundary = true;
-            continue;
-        }
-        let c = text[i..].chars().next().unwrap();
-        if c == '#' && tags && at_boundary {
-            let tag = tag_at(&text[i + 1..]);
-            if !tag.is_empty() {
-                flush(out, plain_start..i);
-                out.push(Event::InlineHtml(tag_html(tag).into()));
-                i += 1 + tag.len();
-                plain_start = i;
-                at_boundary = false;
-                continue;
-            }
-        }
-        at_boundary = c.is_whitespace();
-        i += c.len_utf8();
-    }
-    flush(out, plain_start..text.len());
 }
 
 /// Returns the tag at the start of `text` (after the `#`), or an empty string if there is none.
@@ -709,20 +770,31 @@ fn strip_comments(markdown: &str) -> String {
     if !markdown.contains("%%") {
         return markdown.to_owned();
     }
-    let protected = ranges(markdown, |event| {
-        matches!(
-            event,
-            Event::Start(Tag::CodeBlock(_))
-                | Event::Code(_)
-                | Event::InlineMath(_)
-                | Event::DisplayMath(_)
-        )
-    });
+    let arena = Allocator::for_source_len(markdown.len());
+    let mut protected: Vec<Range<usize>> = Vec::new();
+    if let Ok(document) = Parser::with_options(&arena, markdown, options()).parse() {
+        visit(&document.children, &mut |node| {
+            if let Node::CodeBlock(_)
+            | Node::InlineCode(_)
+            | Node::InlineMath(_)
+            | Node::MathBlock(_) = node
+            {
+                let span = node.span();
+                protected.push(span.start as usize..span.end as usize);
+            }
+        });
+    }
+    // Visiting is in document order and these nodes don't nest, so the ranges can be binary
+    // searched.
+    let is_protected = |i: usize| {
+        let index = protected.partition_point(|range| range.end <= i);
+        protected.get(index).is_some_and(|range| range.contains(&i))
+    };
     let find_delimiter = |from: usize| {
         markdown[from..]
             .match_indices("%%")
             .map(|(i, _)| from + i)
-            .find(|&i| !contains(&protected, i))
+            .find(|&i| !is_protected(i))
     };
 
     let mut out = String::new();
@@ -735,62 +807,7 @@ fn strip_comments(markdown: &str) -> String {
     out
 }
 
-/// Takes an image's label (its alt text, or for a wikilink the part after `|`) from the end of
-/// the reversed `events`, up to and including the image's end.
-///
-/// Only text, code, math, links, emphasis and line breaks are kept. Nested images are reduced to
-/// their labels.
-fn image_label<'a>(events: &mut Vec<Event<'a>>) -> Vec<Event<'a>> {
-    let mut label = Vec::new();
-    let mut depth = 0;
-    while let Some(event) = events.pop() {
-        match event {
-            Event::Start(Tag::Image { .. }) => depth += 1,
-            Event::End(TagEnd::Image) if depth == 0 => break,
-            Event::End(TagEnd::Image) => depth -= 1,
-            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. })
-            | Event::End(
-                TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link,
-            )
-            | Event::Text(_)
-            | Event::Code(_)
-            | Event::InlineMath(_)
-            | Event::DisplayMath(_)
-            | Event::SoftBreak
-            | Event::HardBreak => label.push(event),
-            _ => {}
-        }
-    }
-    label
-}
-
-/// Called at the start of a blockquote. If it is a callout, consumes the callout marker from the
-/// reversed `events`, pushes the callout's opening and the start of its title to `out`, and
-/// returns the callout.
-fn start_callout<'a>(events: &mut Vec<Event<'a>>, out: &mut Vec<Event<'a>>) -> Option<Callout> {
-    let (Some(Event::Start(Tag::Paragraph)), Some(Event::Text(text))) =
-        (events.last(), events.iter().rev().nth(1))
-    else {
-        return None;
-    };
-    let (callout, rest) = Callout::parse(text)?;
-    let rest = rest.to_owned();
-    events.pop(); // Start(Paragraph)
-    events.pop(); // Text
-    out.push(Event::Html(callout.open().into()));
-    if !rest.is_empty() {
-        out.push(Event::Text(rest.into()));
-    } else if matches!(
-        events.last(),
-        Some(Event::SoftBreak | Event::HardBreak | Event::End(TagEnd::Paragraph))
-    ) {
-        out.push(Event::Text(callout.default_title().into()));
-    }
-    Some(callout)
-}
-
 /// An Obsidian callout: a blockquote starting with `[!type]`.
-#[derive(Clone)]
 struct Callout {
     kind: String,
     /// `None` if the callout can't be folded, otherwise whether it starts out open.
@@ -854,197 +871,16 @@ impl Callout {
     }
 }
 
-/// Renders a code block, taking its contents from the end of the reversed `events`.
-fn code_block(kind: &CodeBlockKind, events: &mut Vec<Event>) -> String {
-    let mut code = String::new();
-    // Code blocks only contain text, so this stops after popping the block's end.
-    while let Some(Event::Text(text)) = events.pop() {
-        code.push_str(&text);
-    }
-    let lang = match kind {
-        CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
-        CodeBlockKind::Indented => "",
-    };
+/// Renders a code block.
+fn code_block(info: &str, code: &str) -> String {
+    let lang = info.split_whitespace().next().unwrap_or("");
     let class = if lang.is_empty() {
         String::new()
     } else {
         format!(" class=\"language-{}\"", attr(lang))
     };
-    let code = highlight::highlight(lang, &code).unwrap_or_else(|| text(&code));
+    let code = highlight::highlight(lang, code).unwrap_or_else(|| text(code));
     format!("<pre><code{class}>{code}</code></pre>\n")
-}
-
-/// Turns a wikilink target like `Note#Heading` or `#^block` into a URL, like `Note#heading` or
-/// `#block`.
-fn wikilink_href(target: &str) -> String {
-    let Some((page, fragment)) = target.split_once('#') else {
-        return target.trim().to_owned();
-    };
-    // `Note#Heading#Subheading` links to the subheading.
-    let fragment = fragment.rsplit('#').next().unwrap().trim();
-    if let Some(block_id) = fragment.strip_prefix('^') {
-        format!("{}#{block_id}", page.trim())
-    } else {
-        format!("{}#{}", page.trim(), slugify(fragment))
-    }
-}
-
-/// Turns heading text into an `id`, e.g. `Hello, World!` into `hello-world`.
-fn slugify(text: &str) -> String {
-    let mut slug = String::new();
-    for c in text.chars() {
-        if c.is_alphanumeric() {
-            slug.extend(c.to_lowercase());
-        } else if (c.is_whitespace() || c == '-' || c == '_') && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "section".to_owned()
-    } else {
-        slug.to_owned()
-    }
-}
-
-/// Moves footnote definitions into a list at the end of the document, numbered in the order
-/// they are first referenced, each with a link back to its first reference. Definitions that are
-/// never referenced are dropped, as on GitHub.
-fn footnotes(events: Vec<Event>) -> Vec<Event> {
-    let mut out = Vec::new();
-    let mut definitions = HashMap::new();
-    // The definition being collected, if any.
-    let mut definition: Option<(CowStr, Vec<Event>)> = None;
-    let mut numbers = FootnoteNumbers::default();
-    for event in events {
-        match event {
-            Event::Start(Tag::FootnoteDefinition(label)) => definition = Some((label, Vec::new())),
-            Event::End(TagEnd::FootnoteDefinition) => {
-                let (label, body) = definition.take().expect("definitions don't nest");
-                // Like links, the first definition of a label wins.
-                definitions.entry(label).or_insert(body);
-            }
-            // References in definitions are numbered when the definition is output, so that
-            // references in unused definitions don't count.
-            event => match &mut definition {
-                Some((_, body)) => body.push(event),
-                None => out.push(numbers.reference(event)),
-            },
-        }
-    }
-
-    if numbers.labels.is_empty() {
-        return out;
-    }
-    out.push(Event::Html(
-        "<section class=\"footnotes\">\n<hr />\n<ol>\n".into(),
-    ));
-    // Outputting a definition can reference more footnotes, which are added to the end.
-    let mut index = 0;
-    while let Some(label) = numbers.labels.get(index) {
-        index += 1;
-        let mut body = definitions.remove(label).unwrap_or_default();
-        out.push(Event::Html(format!("<li id=\"fn-{index}\">\n").into()));
-        let backref = format!(
-            "<a href=\"#fnref-{index}\" class=\"footnote-backref\" \
-             aria-label=\"Back to reference {index}\">\u{21a9}\u{fe0e}</a>"
-        );
-        // The link back goes at the end of the last paragraph, or in a paragraph of its own.
-        if body.last() == Some(&Event::End(TagEnd::Paragraph)) {
-            body.insert(
-                body.len() - 1,
-                Event::InlineHtml(format!(" {backref}").into()),
-            );
-        } else {
-            body.push(Event::Start(Tag::Paragraph));
-            body.push(Event::InlineHtml(backref.into()));
-            body.push(Event::End(TagEnd::Paragraph));
-        }
-        for event in body {
-            out.push(numbers.reference(event));
-        }
-        out.push(Event::Html("</li>\n".into()));
-    }
-    out.push(Event::Html("</ol>\n</section>\n".into()));
-    out
-}
-
-/// Footnote numbers, assigned in the order footnotes are first referenced.
-#[derive(Default)]
-struct FootnoteNumbers<'a> {
-    /// Referenced labels, in order.
-    labels: Vec<CowStr<'a>>,
-    /// Each referenced label's number.
-    numbers: HashMap<CowStr<'a>, usize>,
-}
-
-impl<'a> FootnoteNumbers<'a> {
-    /// Renders a footnote reference as a link to its footnote, numbering it if it is the first
-    /// reference to it. Other events are returned unchanged.
-    fn reference(&mut self, event: Event<'a>) -> Event<'a> {
-        let Event::FootnoteReference(label) = event else {
-            return event;
-        };
-        let (n, id) = if let Some(&n) = self.numbers.get(&label) {
-            (n, String::new())
-        } else {
-            let n = self.labels.len() + 1;
-            self.labels.push(label.clone());
-            self.numbers.insert(label, n);
-            (n, format!(" id=\"fnref-{n}\""))
-        };
-        Event::InlineHtml(
-            format!("<sup class=\"footnote-ref\"><a href=\"#fn-{n}\"{id}>{n}</a></sup>").into(),
-        )
-    }
-}
-
-/// Moves figures (the only block-level HTML inside paragraphs) out of their paragraphs, splitting
-/// the paragraph around them, since `<p>` can't contain `<figure>`.
-fn hoist_figures(events: Vec<Event>) -> Vec<Event> {
-    let mut out = Vec::new();
-    let mut in_paragraph = false;
-    for event in events {
-        match event {
-            Event::Start(Tag::Paragraph) => {
-                in_paragraph = true;
-                out.push(event);
-            }
-            Event::End(TagEnd::Paragraph) => {
-                in_paragraph = false;
-                close_paragraph(&mut out);
-            }
-            Event::Html(_) if in_paragraph => {
-                close_paragraph(&mut out);
-                out.push(event);
-                out.push(Event::Start(Tag::Paragraph));
-            }
-            // Don't start the rest of a split paragraph with a line break.
-            _ if is_blank(&event) && out.last() == Some(&Event::Start(Tag::Paragraph)) => {}
-            event => out.push(event),
-        }
-    }
-    out
-}
-
-/// Ends the paragraph at the end of `out`, removing it if it is empty.
-fn close_paragraph(out: &mut Vec<Event>) {
-    while out.last().is_some_and(is_blank) {
-        out.pop();
-    }
-    if out.last() == Some(&Event::Start(Tag::Paragraph)) {
-        out.pop();
-    } else {
-        out.push(Event::End(TagEnd::Paragraph));
-    }
-}
-
-fn is_blank(event: &Event) -> bool {
-    match event {
-        Event::SoftBreak | Event::HardBreak => true,
-        Event::Text(text) => text.trim().is_empty(),
-        _ => false,
-    }
 }
 
 /// Whether a link points to another site rather than into the vault.
@@ -1055,31 +891,6 @@ fn is_remote(link: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
         })
-}
-
-fn is_image(target: &str) -> bool {
-    vault::image_mime_type(Path::new(target.split('#').next().unwrap())).is_some()
-}
-
-/// Escapes text for an HTML attribute value.
-fn attr(s: &str) -> String {
-    let mut out = String::new();
-    escape_html(&mut out, s).unwrap();
-    out
-}
-
-/// Escapes text for HTML element content.
-fn text(s: &str) -> String {
-    let mut out = String::new();
-    escape_html_body_text(&mut out, s).unwrap();
-    out
-}
-
-/// Escapes a URL for an `href` or `src` attribute value.
-fn href(s: &str) -> String {
-    let mut out = String::new();
-    escape_href(&mut out, s).unwrap();
-    out
 }
 
 /// Parses an embed size like `300` or `300x200` into `width` and `height` attributes.
@@ -1180,22 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn wikilinks() {
-        assert_eq!(
-            to_html("[[My Note]]"),
-            "<p><a href=\"My%20Note\">My Note</a></p>\n"
-        );
-        assert_eq!(
-            to_html("[[Note#Some Heading|alias]]"),
-            "<p><a href=\"Note#some-heading\">alias</a></p>\n"
-        );
-        assert_eq!(
-            to_html("[[#^abc|block]]"),
-            "<p><a href=\"#abc\">block</a></p>\n"
-        );
-    }
-
-    #[test]
     fn gfm_extensions() {
         assert_eq!(
             to_html("| a |\n| - |\n| b |\n\n~~s~~ x[^1]\n\n- [ ] t\n\n[^1]: n"),
@@ -1251,18 +1046,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn other_embeds_are_links() {
-        assert_eq!(
-            to_html("![[Other Note#Part]]"),
-            "<p><a href=\"Other%20Note#part\">Other Note#Part</a></p>\n"
-        );
-        assert_eq!(
-            to_html("![[a&b.pdf|The PDF]]"),
-            "<p><a href=\"a&amp;b.pdf\">The PDF</a></p>\n"
-        );
-    }
-
     /// A vault with `img/cat.png` (containing `cat`) and `notes/dog.svg` (containing `dog`).
     fn vault() -> (TempDir, Vault) {
         let dir = TempDir::new();
@@ -1286,11 +1069,11 @@ mod tests {
     fn images_without_alt_text() {
         let html = |md| render_in_vault(md).unwrap();
         assert_eq!(
-            html("![[cat.png]]"),
+            html("![](cat.png)"),
             format!("<p><img src=\"{CAT}\" alt=\"\"></p>\n")
         );
         assert_eq!(
-            html("A ![[cat.png|300x200]] B"),
+            html("A ![|300x200](cat.png) B"),
             format!("<p>A <img src=\"{CAT}\" alt=\"\" width=\"300\" height=\"200\"> B</p>\n")
         );
         assert_eq!(
@@ -1310,11 +1093,11 @@ mod tests {
             format!("<figure>\n{img}\n<figcaption>{caption}</figcaption>\n</figure>\n")
         };
         assert_eq!(
-            html("![[cat.png|A cat]]"),
+            html("![A cat](cat.png)"),
             figure(&format!("<img src=\"{CAT}\" alt=\"A cat\">"), "A cat")
         );
         assert_eq!(
-            html("![[cat.png|Tom & \"Jerry\"|300]]"),
+            html("![Tom & \"Jerry\"|300](cat.png)"),
             figure(
                 &format!("<img src=\"{CAT}\" alt=\"Tom &amp; &quot;Jerry&quot;\" width=\"300\">"),
                 "Tom &amp; \"Jerry\""
@@ -1388,14 +1171,14 @@ mod tests {
         );
         // A size can't contain markup.
         assert_eq!(
-            html("![[cat.png|A *cat*|3**0**0]]"),
+            html("![A *cat*|3**0**0](cat.png)"),
             figure("A cat|300", "", "A <em>cat</em>|3<strong>0</strong>0")
         );
     }
 
     #[test]
     fn figures_split_paragraphs() {
-        let html = render_in_vault("Before\n![[cat.png|Cat]]\nafter *it*.").unwrap();
+        let html = render_in_vault("Before\n![Cat](cat.png)\nafter *it*.").unwrap();
         assert_eq!(
             html,
             format!(
@@ -1436,13 +1219,13 @@ mod tests {
 
     #[test]
     fn adjacent_figures_have_no_paragraph_between() {
-        let html = render_in_vault("![[cat.png|A]] ![[cat.png|B]]").unwrap();
+        let html = render_in_vault("![A](cat.png) ![B](cat.png)").unwrap();
         assert!(html.contains("</figure>\n<figure>"), "{html}");
     }
 
     #[test]
     fn missing_images_are_errors() {
-        let errors = render_in_vault("![[missing.png]]\n\n![x](nope.jpg)\n\n![[cat.png]]\n\n![]()")
+        let errors = render_in_vault("![](missing.png)\n\n![x](nope.jpg)\n\n![](cat.png)\n\n![]()")
             .unwrap_err();
         assert_eq!(
             errors,
@@ -1541,8 +1324,8 @@ mod tests {
             "<p><em>==a</em> <mark>b</mark></p>\n"
         );
         assert_eq!(to_html("==unclosed"), "<p>==unclosed</p>\n");
-        // Marks crossing other inline elements would produce invalid HTML.
-        assert_eq!(to_html("==a *b== c*"), "<p>==a <em>b== c</em></p>\n");
+        // Marks can't cross other inline elements.
+        assert_eq!(to_html("==a *b== c*"), "<p><mark>a *b</mark> c*</p>\n");
         assert_eq!(to_html("`==code==`"), "<p><code>==code==</code></p>\n");
     }
 
@@ -1578,6 +1361,13 @@ mod tests {
             "<h1 id=\"hello-world\">Hello <em>World</em></h1>\n\
              <h2 id=\"hello-world-1\">Hello World</h2>\n\
              <h2 id=\"x-y\"><code>x</code> y</h2>\n"
+        );
+        // Punctuation separates words, math is left out, and later headings never reuse an id.
+        assert_eq!(
+            to_html("# What's new?\n# The $x$ term\n# A\n# A\n# A-1"),
+            "<h1 id=\"what-s-new\">What's new?</h1>\n\
+             <h1 id=\"the-term\">The <math><mi>x</mi></math> term</h1>\n\
+             <h1 id=\"a\">A</h1>\n<h1 id=\"a-1\">A</h1>\n<h1 id=\"a-1-1\">A-1</h1>\n"
         );
     }
 
@@ -1657,14 +1447,5 @@ mod tests {
         let html = to_html("$$\n50\\%% x\n$$\n");
         // `\%` is a percent sign and the following `%` starts a LaTeX comment.
         assert!(html.contains("<mn>50</mn><mi>%</mi>"), "{html}");
-    }
-
-    #[test]
-    fn slugs() {
-        assert_eq!(slugify("Hello, World!"), "hello-world");
-        assert_eq!(slugify("  Ünïcode  — dash "), "ünïcode-dash");
-        assert_eq!(slugify("!!!"), "section");
-        assert_eq!(slugify("a - b_c"), "a-b-c");
-        assert_eq!(slugify("a,b-c"), "ab-c");
     }
 }

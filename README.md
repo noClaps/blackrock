@@ -28,11 +28,11 @@ The `version` input picks which release binary to install; the tag after `@` onl
 
 ## Features
 
-- CommonMark plus tables, footnotes, strikethrough and task lists. Tables are wrapped in a `<div>`
-- PNG, JPEG, GIF, SVG, WebP and AVIF images (`![[cat.png]]`, `![alt](cat.png)`) are embedded as `data:` URLs, base64-encoded except for SVGs, which are percent-encoded to stay smaller. Like Obsidian, they are looked up relative to the note, then the vault root, then anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian: `![[cat.png|300]]`, `![[cat.png|A cat|300x200]]`, `![A cat|300](cat.png)`
+- Markdown parsed with [ferromark](https://github.com/sebastian-software/ferromark): CommonMark plus tables, footnotes, strikethrough and task lists. Tables are wrapped in a `<div>`
+- PNG, JPEG, GIF, SVG, WebP and AVIF images (`![alt](cat.png)`) are embedded as `data:` URLs, base64-encoded except for SVGs, which are percent-encoded to stay smaller. Like Obsidian, they are looked up relative to the note, then the vault root, then anywhere in the vault by name. Remote images (`https://…`) are left as links. Sizes work as in Obsidian: `![|300](cat.png)`, `![A cat|300x200](cat.png)`
 - Images with alt text become `<figure>`s with the alt text as the `<figcaption>`. Links, formatting and math are rendered in the caption; the `alt` attribute gets their plain text, with math as LaTeX
-- Obsidian syntax: `[[wikilinks]]`, `![[embeds]]` (embeds of other files become links), callouts (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
-- Headings get `id`s, so `[[Note#Heading]]` and `[[#Heading]]` links resolve
+- Obsidian syntax: callouts (`> [!note]`, foldable with `+`/`-`), `==highlights==`, `#tags`, `%%comments%%`, `^block-ids`
+- Headings get `id`s from ferromark's slugs (lowercase, with punctuation and spaces as `-`, e.g. `what-s-new`), so links like `[x](Note#some-heading)` and `[x](#some-heading)` resolve. Wikilinks aren't supported; use markdown links
 - Footnotes (`[^1]`) are numbered in the order they're first referenced and collected at the end in a `<section class="footnotes">`, after an `<hr />`, each with a link back to its first reference
 - Inline (`$…$`) and block (`$$…$$`) LaTeX math rendered to [MathML Core](https://www.w3.org/TR/mathml-core/) with [math-core](https://github.com/tmke8/math-core). A `$$` line starts a block that ends at the next `$$` line, and the lines in between are never parsed as markdown, so a LaTeX line starting with `- ` can't become a list. Blocks, and `$$…$$` on its own line, are wrapped in a `<div>`
 - Code blocks highlighted with [Irosashi](https://github.com/frostybee/irosashi) using [Shiki](https://shiki.style/languages)'s grammars and Xcode's default light and dark themes, as inline `style="color:light-dark(…)"` on `<span>`s. The `<pre>` and `<code>` elements get no styles. Every language Shiki bundles is supported, by its Shiki id or alias

@@ -10,7 +10,7 @@ rating: 4.5
 
 # Sample note
 
-Links to [[Other Note]], [[Other Note#Some Section|a section]] and [[#Code]]. Tagged #example and #nested/tag.
+Links to [Other Note](Other%20Note), [a section](Other%20Note#some-section) and [#Code](#code). Tagged #example and #nested/tag.
 
 This is ==highlighted== text with a %%hidden%% comment and **bold** text. ^intro
 
@@ -54,7 +54,7 @@ const users: User[] = [];
 - [x] Done
 - [ ] Todo
 
-![[diagram.svg|The conversion pipeline|240]]
+![The conversion pipeline|240](diagram.svg)
 
 An inline icon ![](attachments/diagram.svg) without alt text.
 

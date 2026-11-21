@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, fmt::Write, sync::LazyLock};
 use irosashi::{
     CodeToTokensOptions, DiagnosticKind, FontStyle, Highlighter, ThemedToken, TokensResult,
 };
-use pulldown_cmark_escape::escape_html_body_text;
+
+use crate::escape;
 
 /// Shiki's grammars, each loaded when first used, and Xcode's Default (Light) and Default (Dark)
 /// colors as VS Code themes. The themes are generated from Xcode's `.xccolortheme` files, mapping
@@ -50,7 +51,7 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
     for line in &result.lines {
         for token in &line.tokens {
             let start = line.range.start + token.start;
-            escape_html_body_text(&mut html, &result.source[written..start]).ok()?;
+            html.push_str(&escape::text(&result.source[written..start]));
             let style = token_style(&result, token);
             if style != open {
                 if !open.is_empty() {
@@ -63,13 +64,13 @@ pub fn highlight(lang: &str, code: &str) -> Option<String> {
                 open = style;
             }
             written = line.range.start + token.end;
-            escape_html_body_text(&mut html, &result.source[start..written]).ok()?;
+            html.push_str(&escape::text(&result.source[start..written]));
         }
     }
     if !open.is_empty() {
         html.push_str("</span>");
     }
-    escape_html_body_text(&mut html, &result.source[written..]).ok()?;
+    html.push_str(&escape::text(&result.source[written..]));
     Some(html)
 }
 

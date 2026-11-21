@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::vault::Vault;
 
+mod escape;
 mod frontmatter;
 mod highlight;
 mod render;
