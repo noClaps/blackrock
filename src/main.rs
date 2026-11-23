@@ -73,11 +73,12 @@ fn main() -> Result<()> {
             .as_deref()
             .and_then(Path::parent)
             .unwrap_or(Path::new(""));
-        println!(
-            "{}",
-            render::to_html(&document, &source, &vault, note_dir)
-                .map_err(|es| anyhow!("{}", es.join("\n")))?
-        );
+        let mut warnings = Vec::new();
+        let html = render::to_html(&document, &source, &vault, note_dir, &mut warnings);
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        println!("{}", html.map_err(|es| anyhow!("{}", es.join("\n")))?);
     }
     Ok(())
 }

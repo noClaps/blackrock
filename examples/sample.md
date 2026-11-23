@@ -10,7 +10,7 @@ rating: 4.5
 
 # Sample note
 
-Links to [Other Note](Other%20Note), [a section](Other%20Note#some-section) and [#Code](#code). Tagged #example and #nested/tag.
+Links to [Other Note](Other%20Note), [a section](Other%20Note#Some%20section) and [#Code](#code). Tagged #example and #nested/tag.
 
 This is ==highlighted== text and **bold** text. ^intro
 

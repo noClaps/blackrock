@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fmt::Write, path::Path};
+use std::{
+    collections::HashMap,
+    fmt::Write,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ferromark::{
     Allocator, HeadingIdPlanner, ParseResult, Parser, ParserOptions,
@@ -35,11 +40,14 @@ pub fn parse<'a>(arena: &'a Allocator, source: &'a str) -> ParseResult<Document<
 ///
 /// Local images are looked up in `vault`, starting from the note's directory `note_dir`
 /// (relative to the vault root). Returns all errors if any image or math can't be rendered.
+/// Links to notes or headings that can't be found are left as they are, with a warning added to
+/// `warnings` for each.
 pub fn to_html(
     document: &Document,
     source: &str,
     vault: &Vault,
     note_dir: &Path,
+    warnings: &mut Vec<String>,
 ) -> Result<String, Vec<String>> {
     let mut definitions = HashMap::new();
     footnote_definitions(&document.children, &mut definitions);
@@ -48,14 +56,23 @@ pub fn to_html(
         global_group: true,
         ..Default::default()
     };
+    let mut ids = HeadingIdPlanner::new();
+    let mut headings = Vec::new();
+    collect_headings(&document.children, &mut ids, &mut headings);
     let mut renderer = Renderer {
         source,
         math: LatexToMathML::new(config, Vec::new()).expect("no custom macros"),
-        ids: HeadingIdPlanner::new(),
+        heading_ids: (headings.iter())
+            .map(|(start, heading)| (*start, heading.id.clone()))
+            .collect(),
+        headings: headings.into_iter().map(|(_, heading)| heading).collect(),
+        ids,
+        note_headings: HashMap::new(),
         footnote_labels: Vec::new(),
         vault,
         note_dir,
         errors: Vec::new(),
+        warnings,
         link_depth: 0,
         in_label: false,
         at_boundary: true,
@@ -128,17 +145,94 @@ fn footnote_definitions<'n, 'a>(
     }
 }
 
+/// A heading that links can point to.
+struct Heading {
+    level: u8,
+    /// What links to the heading are compared by: the slug of its plain text, with math as
+    /// LaTeX, since that's what Obsidian puts in links.
+    key: String,
+    id: String,
+}
+
+/// Collects the headings in `nodes` in order, with their source offsets, giving each an id from
+/// `ids`. Headings in footnotes are left out, since footnotes are rendered last, if at all.
+fn collect_headings(nodes: &[Node], ids: &mut HeadingIdPlanner, out: &mut Vec<(u32, Heading)>) {
+    for node in nodes {
+        match node {
+            Node::Heading(heading) => out.push((
+                heading.span.start,
+                Heading {
+                    level: heading.depth,
+                    key: slugify_heading(&plain_text(&pieces(&heading.children))),
+                    id: ids.plan(&slugify_heading(&collect_heading_text(&heading.children))),
+                },
+            )),
+            Node::BlockQuote(quote) => collect_headings(&quote.children, ids, out),
+            Node::List(list) => {
+                for item in &list.children {
+                    collect_headings(&item.children, ids, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Finds the id of the heading a link fragment like `Heading` or `Top#Heading` points to: the
+/// first heading matching the last part whose enclosing headings match the other parts, in
+/// order (but not necessarily directly).
+fn find_heading<'h>(headings: &'h [Heading], path: &[String]) -> Option<&'h str> {
+    let (last, parents) = path.split_last()?;
+    let mut enclosing: Vec<&Heading> = Vec::new();
+    for heading in headings {
+        while enclosing.last().is_some_and(|h| h.level >= heading.level) {
+            enclosing.pop();
+        }
+        if heading.key == *last {
+            let mut enclosing_keys = enclosing.iter().map(|h| &h.key);
+            if parents.iter().all(|p| enclosing_keys.any(|k| k == p)) {
+                return Some(&heading.id);
+            }
+        }
+        enclosing.push(heading);
+    }
+    None
+}
+
+/// The headings of the note at `path`.
+fn note_headings(path: &Path) -> Result<Vec<Heading>, String> {
+    let source =
+        fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let arena = Allocator::for_source_len(source.len());
+    let document =
+        parse(&arena, &source).map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
+    let mut headings = Vec::new();
+    collect_headings(
+        &document.children,
+        &mut HeadingIdPlanner::new(),
+        &mut headings,
+    );
+    Ok(headings.into_iter().map(|(_, heading)| heading).collect())
+}
+
 struct Renderer<'s, 'v> {
     /// The parsed markdown, which node spans point into.
     source: &'s str,
     math: LatexToMathML,
+    /// The ids of the note's headings outside footnotes, by source offset.
+    heading_ids: HashMap<u32, String>,
+    /// The note's headings outside footnotes, in order.
+    headings: Vec<Heading>,
     /// The heading ids used so far.
     ids: HeadingIdPlanner,
+    /// The headings of other notes that links point to, by path, or why they can't be read.
+    note_headings: HashMap<PathBuf, Result<Vec<Heading>, String>>,
     /// Referenced footnote labels, in the order they are first referenced.
     footnote_labels: Vec<String>,
     vault: &'v Vault,
     note_dir: &'v Path,
     errors: Vec<String>,
+    warnings: &'v mut Vec<String>,
     /// How many links we are in. Links can't contain tags, and images in them aren't figures.
     link_depth: usize,
     /// Whether we are in an image's label, where nested images are reduced to their labels.
@@ -188,8 +282,10 @@ impl Renderer<'_, '_> {
             }
             Node::Heading(heading) => {
                 let pieces = pieces(&heading.children);
-                let id =
-                    (self.ids).plan(&slugify_heading(&collect_heading_text(&heading.children)));
+                let id = self.heading_ids.get(&heading.span.start).cloned();
+                let id = id.unwrap_or_else(|| {
+                    (self.ids).plan(&slugify_heading(&collect_heading_text(&heading.children)))
+                });
                 let level = heading.depth;
                 _ = write!(out, "<h{level} id=\"{}\">", attr(&id));
                 self.inlines(&pieces, out);
@@ -452,11 +548,7 @@ impl Renderer<'_, '_> {
                 self.at_boundary = true;
             }
             Node::Link(link) => {
-                let url = match link.url.split_once("#^") {
-                    // Block ids are rendered without their `^`.
-                    Some((page, id)) if is_block_id(id) => format!("{page}#{id}"),
-                    _ => link.url.to_owned(),
-                };
+                let url = self.link_url(link.url);
                 _ = write!(out, "<a href=\"{}\"", href(&url));
                 if let Some(title) = link.title.filter(|title| !title.is_empty()) {
                     _ = write!(out, " title=\"{}\"", attr(title));
@@ -490,6 +582,60 @@ impl Renderer<'_, '_> {
                 }
                 self.at_boundary = false;
             }
+        }
+    }
+
+    /// Rewrites the fragment of a link into the vault to the id it points to. Block ids are
+    /// rendered without their `^`. Obsidian's heading fragments, like `#Some%20heading`, or
+    /// `#Top#Heading` for a heading under another, become the id of the heading they point to,
+    /// looked up in the linked note. If it can't be found, the link is left as it is, with a
+    /// warning.
+    fn link_url(&mut self, url: &str) -> String {
+        let Some((page, fragment)) = url.split_once('#') else {
+            return url.to_owned();
+        };
+        if is_remote(url) || fragment.is_empty() {
+            return url.to_owned();
+        }
+        if let Some(id) = fragment.strip_prefix('^') {
+            return if is_block_id(id) {
+                format!("{page}#{id}")
+            } else {
+                url.to_owned()
+            };
+        }
+        let path: Vec<_> = (fragment.split('#'))
+            .map(|part| slugify_heading(&percent_decode_str(part).decode_utf8_lossy()))
+            .collect();
+        let page_name = percent_decode_str(page).decode_utf8_lossy();
+        let headings = if page.is_empty() {
+            &self.headings
+        } else {
+            let Some(note) = self.vault.note_path(&page_name, self.note_dir) else {
+                self.warnings
+                    .push(format!("linked note not found in vault: {page_name}"));
+                return url.to_owned();
+            };
+            let headings =
+                (self.note_headings.entry(note)).or_insert_with_key(|note| note_headings(note));
+            match headings {
+                Ok(headings) => headings,
+                Err(err) => {
+                    self.warnings.push(err.clone());
+                    return url.to_owned();
+                }
+            }
+        };
+        if let Some(id) = find_heading(headings, &path) {
+            format!("{page}#{id}")
+        } else {
+            let heading = percent_decode_str(fragment).decode_utf8_lossy();
+            self.warnings.push(if page.is_empty() {
+                format!("linked heading not found: #{heading}")
+            } else {
+                format!("linked heading not found in {page_name}: #{heading}")
+            });
+            url.to_owned()
         }
     }
 
@@ -844,9 +990,21 @@ mod tests {
     use crate::vault::tests::TempDir;
 
     fn render(markdown: &str, vault: &Vault, note_dir: &Path) -> Result<String, Vec<String>> {
+        let (html, warnings) = render_with_warnings(markdown, vault, note_dir);
+        assert_eq!(warnings, Vec::<String>::new(), "{markdown:?}");
+        html
+    }
+
+    fn render_with_warnings(
+        markdown: &str,
+        vault: &Vault,
+        note_dir: &Path,
+    ) -> (Result<String, Vec<String>>, Vec<String>) {
         let arena = Allocator::for_source_len(markdown.len());
         let document = parse(&arena, markdown).unwrap();
-        super::to_html(&document, markdown, vault, note_dir)
+        let mut warnings = Vec::new();
+        let html = super::to_html(&document, markdown, vault, note_dir, &mut warnings);
+        (html, warnings)
     }
 
     /// Renders markdown that doesn't reference any vault files.
@@ -1336,6 +1494,103 @@ mod tests {
             to_html("[a](#^abc) [b](Note#^x-1) [c](#^no!) [d](^e)"),
             "<p><a href=\"#abc\">a</a> <a href=\"Note#x-1\">b</a> \
              <a href=\"#^no!\">c</a> <a href=\"^e\">d</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn heading_links() {
+        assert_eq!(
+            to_html(
+                "# Sequences and series\n# What's new?\n\
+                 [a](#Sequences%20and%20series) [b](#What's%20new?) [c](#sequences-and-series) \
+                 [d](https://x.com/#Some%20Heading) [e](#) [f](Missing)"
+            ),
+            "<h1 id=\"sequences-and-series\">Sequences and series</h1>\n\
+             <h1 id=\"what-s-new\">What's new?</h1>\n\
+             <p><a href=\"#sequences-and-series\">a</a> <a href=\"#what-s-new\">b</a> \
+             <a href=\"#sequences-and-series\">c</a> \
+             <a href=\"https://x.com/#Some%20Heading\">d</a> <a href=\"#\">e</a> \
+             <a href=\"Missing\">f</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn nested_heading_links() {
+        let links = |md: &str| {
+            let html = to_html(md);
+            html.split("href=\"#")
+                .skip(1)
+                .map(|rest| rest[..rest.find('"').unwrap()].to_owned())
+                .collect::<Vec<_>>()
+        };
+        let note = "# Week 1\n## Exercises\n### Hard\n# Week 2\n## Exercises\n### Hard\n";
+        assert_eq!(
+            links(&format!(
+                "{note}[a](#Exercises) [b](#Week%202#Exercises) [c](#Week%202#Hard) \
+                 [d](#Week%202#Exercises#Hard) [e](#Week%201#Hard)"
+            )),
+            ["exercises", "exercises-1", "hard-1", "hard-1", "hard"]
+        );
+        // Ids that clash with an earlier heading's, and math as LaTeX.
+        assert_eq!(
+            links("# A\n# A\n# A-1\n# The $x$ term\n[a](#A-1) [b](#The%20$x$%20term)"),
+            ["a-1-1", "the-term"]
+        );
+        // Headings in quotes and lists count, and footnote headings don't take their ids.
+        let md = "> # Q\n\n- # L\n\n[a](#Q) [b](#L) [^1]\n\n[^1]: # Q\n\n# Q";
+        assert_eq!(links(md)[..2], ["q", "l"]);
+        let html = to_html(md);
+        assert!(html.contains("<h1 id=\"q-1\">Q</h1>\n<section"), "{html}");
+        assert!(html.contains("<h1 id=\"q-2\">Q</h1>"), "{html}");
+    }
+
+    #[test]
+    fn links_to_other_notes_headings() {
+        let (dir, vault) = vault();
+        std::fs::write(
+            dir.path().join("notes/Other Note.md"),
+            "# Top\n## Same\n# Next\n## Same\n",
+        )
+        .unwrap();
+        let html = render(
+            "[a](Other%20Note#Next#Same) [b](Other%20Note.md#Same) \
+             [c](../notes/Other%20Note#Next#Same)",
+            &vault,
+            Path::new("notes"),
+        )
+        .unwrap();
+        assert_eq!(
+            html,
+            "<p><a href=\"Other%20Note#same-1\">a</a> <a href=\"Other%20Note.md#same\">b</a> \
+             <a href=\"../notes/Other%20Note#same-1\">c</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn missing_link_targets_are_warnings() {
+        let (dir, vault) = vault();
+        std::fs::write(dir.path().join("notes/Other.md"), "# Top\n## Sub\n").unwrap();
+        let (html, warnings) = render_with_warnings(
+            "# Here\n[a](#Nowhere) [b](#Sub#Top) [c](Missing#Some%20Heading) \
+             [d](Other#Top#Nope) [e](Other#Top#Sub)",
+            &vault,
+            Path::new("notes"),
+        );
+        // The links are left as they are.
+        assert_eq!(
+            html.unwrap(),
+            "<h1 id=\"here\">Here</h1>\n<p><a href=\"#Nowhere\">a</a> <a href=\"#Sub#Top\">b</a> \
+             <a href=\"Missing#Some%20Heading\">c</a> <a href=\"Other#Top#Nope\">d</a> \
+             <a href=\"Other#sub\">e</a></p>\n"
+        );
+        assert_eq!(
+            warnings,
+            [
+                "linked heading not found: #Nowhere",
+                "linked heading not found: #Sub#Top",
+                "linked note not found in vault: Missing",
+                "linked heading not found in Other: #Top#Nope",
+            ]
         );
     }
 

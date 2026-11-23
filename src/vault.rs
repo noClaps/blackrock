@@ -52,6 +52,13 @@ impl Vault {
         })
     }
 
+    /// Finds the note a link in a note in `note_dir` points to, with or without its `.md`.
+    pub fn note_path(&self, link: &str, note_dir: &Path) -> Option<PathBuf> {
+        let path = self.resolve(link, note_dir);
+        path.filter(|path| path.extension().is_some_and(|e| e == "md"))
+            .or_else(|| self.resolve(&format!("{link}.md"), note_dir))
+    }
+
     /// Finds the file a link in a note in `note_dir` points to, the way Obsidian does: relative
     /// to the note, then relative to the vault root, and finally anywhere in the vault whose path
     /// ends with the link (preferring the shortest such path).
