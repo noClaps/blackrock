@@ -585,49 +585,60 @@ impl Renderer<'_, '_> {
         }
     }
 
-    /// Rewrites the fragment of a link into the vault to the id it points to. Block ids are
-    /// rendered without their `^`. Obsidian's heading fragments, like `#Some%20heading`, or
+    /// Rewrites a link into the vault to the URL of what it points to. Links to notes become
+    /// absolute URLs from the vault root without `.md`, like `/notes/Other%20Note`. Block ids
+    /// are rendered without their `^`. Obsidian's heading fragments, like `#Some%20heading`, or
     /// `#Top#Heading` for a heading under another, become the id of the heading they point to,
-    /// looked up in the linked note. If it can't be found, the link is left as it is, with a
-    /// warning.
+    /// looked up in the linked note. If the heading can't be found, the fragment is left as it
+    /// is, with a warning. If the note can't be found, the link is left as it is, with a warning
+    /// if it has a fragment.
     fn link_url(&mut self, url: &str) -> String {
-        let Some((page, fragment)) = url.split_once('#') else {
-            return url.to_owned();
-        };
-        if is_remote(url) || fragment.is_empty() {
+        if is_remote(url) {
             return url.to_owned();
         }
-        if let Some(id) = fragment.strip_prefix('^') {
-            return if is_block_id(id) {
-                format!("{page}#{id}")
-            } else {
+        let (page, fragment) = url.split_once('#').unwrap_or((url, ""));
+        let page_name = percent_decode_str(page).decode_utf8_lossy();
+        let (page_url, note) = if page.is_empty() {
+            (String::new(), None)
+        } else if let Some(note) = self.vault.note_path(&page_name, self.note_dir) {
+            (self.vault.note_url(&note), Some(note))
+        } else {
+            if !fragment.is_empty() {
+                self.warnings
+                    .push(format!("linked note not found in vault: {page_name}"));
+            }
+            return url.to_owned();
+        };
+        if fragment.is_empty() {
+            return if page.is_empty() {
                 url.to_owned()
+            } else {
+                page_url
             };
+        }
+        if let Some(id) = fragment.strip_prefix('^') {
+            let id = if is_block_id(id) { id } else { fragment };
+            return format!("{page_url}#{id}");
         }
         let path: Vec<_> = (fragment.split('#'))
             .map(|part| slugify_heading(&percent_decode_str(part).decode_utf8_lossy()))
             .collect();
-        let page_name = percent_decode_str(page).decode_utf8_lossy();
-        let headings = if page.is_empty() {
-            &self.headings
-        } else {
-            let Some(note) = self.vault.note_path(&page_name, self.note_dir) else {
-                self.warnings
-                    .push(format!("linked note not found in vault: {page_name}"));
-                return url.to_owned();
-            };
-            let headings =
-                (self.note_headings.entry(note)).or_insert_with_key(|note| note_headings(note));
-            match headings {
-                Ok(headings) => headings,
-                Err(err) => {
-                    self.warnings.push(err.clone());
-                    return url.to_owned();
+        let headings = match note {
+            None => &self.headings,
+            Some(note) => {
+                let headings =
+                    (self.note_headings.entry(note)).or_insert_with_key(|note| note_headings(note));
+                match headings {
+                    Ok(headings) => headings,
+                    Err(err) => {
+                        self.warnings.push(err.clone());
+                        return format!("{page_url}#{fragment}");
+                    }
                 }
             }
         };
         if let Some(id) = find_heading(headings, &path) {
-            format!("{page}#{id}")
+            format!("{page_url}#{id}")
         } else {
             let heading = percent_decode_str(fragment).decode_utf8_lossy();
             self.warnings.push(if page.is_empty() {
@@ -635,7 +646,7 @@ impl Renderer<'_, '_> {
             } else {
                 format!("linked heading not found in {page_name}: #{heading}")
             });
-            url.to_owned()
+            format!("{page_url}#{fragment}")
         }
     }
 
@@ -1490,10 +1501,17 @@ mod tests {
         assert_eq!(to_html("a ^x!"), "<p>a ^x!</p>\n");
         assert_eq!(to_html("^abc"), "<p>^abc</p>\n");
         // Links to block ids drop the `^` too.
+        let (dir, vault) = vault();
+        std::fs::write(dir.path().join("Note.md"), "").unwrap();
         assert_eq!(
-            to_html("[a](#^abc) [b](Note#^x-1) [c](#^no!) [d](^e)"),
-            "<p><a href=\"#abc\">a</a> <a href=\"Note#x-1\">b</a> \
-             <a href=\"#^no!\">c</a> <a href=\"^e\">d</a></p>\n"
+            render(
+                "[a](#^abc) [b](Note#^x-1) [c](#^no!) [d](^e) [e](Note#^no!)",
+                &vault,
+                Path::new("notes")
+            )
+            .unwrap(),
+            "<p><a href=\"#abc\">a</a> <a href=\"/Note#x-1\">b</a> \
+             <a href=\"#^no!\">c</a> <a href=\"^e\">d</a> <a href=\"/Note#^no!\">e</a></p>\n"
         );
     }
 
@@ -1561,8 +1579,38 @@ mod tests {
         .unwrap();
         assert_eq!(
             html,
-            "<p><a href=\"Other%20Note#same-1\">a</a> <a href=\"Other%20Note.md#same\">b</a> \
-             <a href=\"../notes/Other%20Note#same-1\">c</a></p>\n"
+            "<p><a href=\"/notes/Other%20Note#same-1\">a</a> \
+             <a href=\"/notes/Other%20Note#same\">b</a> \
+             <a href=\"/notes/Other%20Note#same-1\">c</a></p>\n"
+        );
+    }
+
+    #[test]
+    fn links_to_notes_are_absolute() {
+        let (dir, vault) = vault();
+        let write = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("notes/b.md", "# Some Heading\n");
+        write("Top #1?.md", "");
+        write("notes/deep/Café.md", "");
+        let html = render(
+            "[a](b.md#Some%20Heading) [b](b) [c](/notes/b.md) [d](Top%20%231%3F) \
+             [e](deep/Caf%C3%A9.md) [f](Caf%C3%A9) [g](dog.svg) [h](Missing) [i](mailto:x@y.z) \
+             [j](b#)",
+            &vault,
+            Path::new("notes"),
+        )
+        .unwrap();
+        assert_eq!(
+            html,
+            "<p><a href=\"/notes/b#some-heading\">a</a> <a href=\"/notes/b\">b</a> \
+             <a href=\"/notes/b\">c</a> <a href=\"/Top%20%231%3F\">d</a> \
+             <a href=\"/notes/deep/Caf%C3%A9\">e</a> <a href=\"/notes/deep/Caf%C3%A9\">f</a> \
+             <a href=\"dog.svg\">g</a> <a href=\"Missing\">h</a> \
+             <a href=\"mailto:x@y.z\">i</a> <a href=\"/notes/b\">j</a></p>\n"
         );
     }
 
@@ -1580,8 +1628,8 @@ mod tests {
         assert_eq!(
             html.unwrap(),
             "<h1 id=\"here\">Here</h1>\n<p><a href=\"#Nowhere\">a</a> <a href=\"#Sub#Top\">b</a> \
-             <a href=\"Missing#Some%20Heading\">c</a> <a href=\"Other#Top#Nope\">d</a> \
-             <a href=\"Other#sub\">e</a></p>\n"
+             <a href=\"Missing#Some%20Heading\">c</a> <a href=\"/notes/Other#Top#Nope\">d</a> \
+             <a href=\"/notes/Other#sub\">e</a></p>\n"
         );
         assert_eq!(
             warnings,

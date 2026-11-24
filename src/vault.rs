@@ -14,6 +14,25 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 /// change its meaning. Everything else, including spaces, can stay as-is.
 const SVG_ESCAPES: &AsciiSet = &CONTROLS.add(b'"').add(b'#').add(b'%').add(b'&');
 
+/// What to escape in a part of a note's URL path: what would end the part or the path, or isn't
+/// safe in a URL. Non-ASCII bytes are always encoded.
+const URL_PATH_ESCAPES: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
 #[derive(Debug)]
 pub struct Vault {
     /// The canonicalized vault root.
@@ -57,6 +76,21 @@ impl Vault {
         let path = self.resolve(link, note_dir);
         path.filter(|path| path.extension().is_some_and(|e| e == "md"))
             .or_else(|| self.resolve(&format!("{link}.md"), note_dir))
+    }
+
+    /// The absolute URL of a note in the vault, from `note_path`: its path from the vault root,
+    /// without `.md` and with each part percent-encoded, like `/notes/Other%20Note`.
+    pub fn note_url(&self, note: &Path) -> String {
+        let relative = note
+            .strip_prefix(&self.root)
+            .unwrap_or(note)
+            .with_extension("");
+        let mut url = String::new();
+        for part in &relative {
+            url.push('/');
+            url.extend(percent_encode(part.as_encoded_bytes(), URL_PATH_ESCAPES));
+        }
+        url
     }
 
     /// Finds the file a link in a note in `note_dir` points to, the way Obsidian does: relative
