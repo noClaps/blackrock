@@ -18,9 +18,9 @@ If anything can't be rendered (a missing image, invalid math), every error is pr
 This repository is an action that downloads a release binary for the runner (Linux or macOS, x86-64 or ARM64) and adds it to the `PATH`. It works on GitHub Actions:
 
 ```yaml
-- uses: noClaps/blackrock@v0.5.0
+- uses: noClaps/blackrock@v0.6.0
   with:
-    version: v0.5.0 # optional, defaults to the latest release
+    version: v0.6.0 # optional, defaults to the latest release
 - run: blackrock notes/note.md > note.html
 ```
 
